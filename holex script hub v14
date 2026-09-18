@@ -6758,26 +6758,246 @@ consoleSec:CreateButton({
     Callback = function() HolexLogger:Info("TEST", "This is a test info log") end
 })
 
--- ==================== GLOBAL CHAT TAB ====================
+-- ==================== GLOBAL CHAT TAB (CLOUD ROOMS) ====================
 local ChatTab = MainWindow:CreateTab("GlobalChat")
-local chatSec = ChatTab:CreateSection("Global Chat")
+local chatSec = ChatTab:CreateSection("Cloud Chat Room")
 chatSec:CreateParagraph({
-    Title = "Holex Global Chat",
-    Content = "Chat with your Holex account.\n• Same PC: shared HolexData/chat\n• Same Roblox server: live [Holex] bridge\nFriends running Holex V14 see green ONLINE."
+    Title = "Real-Time Holex Chat",
+    Content = "Create a room, send the Room ID to your friend.\nFriend joins with the same ID.\nWorks across different PCs while both run Holex V14."
 })
 
 local HOLEX_CHAT_FILE = CHAT_FOLDER .. "/global_chat.json"
-local HOLEX_CHAT_PREFIX = "[Holex]"
-local ChatState = { LastIds = {}, LastCount = 0 }
+local HOLEX_ROOM_FILE = HOLEX_DATA .. "/chat_room.json"
+local JSONBLOB = "https://jsonblob.com/api/jsonBlob"
+
+local CloudChat = {
+    RoomId = nil,
+    RoomCode = nil,
+    Connected = false,
+    SeenKeys = {},
+}
 
 pcall(function()
-    if HolexEnsureDir then HolexEnsureDir(HOLEX_CHAT_FILE) end
+    if HolexEnsureDir then HolexEnsureDir(HOLEX_ROOM_FILE) end
     if isfolder and not isfolder(CHAT_FOLDER) then makefolder(CHAT_FOLDER) end
 end)
 
+local function HolexHttp(url, method, body, headers)
+    method = method or "GET"
+    headers = headers or {}
+    headers["Content-Type"] = headers["Content-Type"] or "application/json"
+    headers["Accept"] = "application/json"
+    local result = nil
+    pcall(function()
+        if Utilities and Utilities.HTTPRequest then
+            result = Utilities:HTTPRequest(url, method, body, headers)
+        end
+    end)
+    if result then return result end
+    pcall(function()
+        local req = (syn and syn.request) or http_request or request
+        if req then
+            local r = req({ Url = url, Method = method, Headers = headers, Body = body })
+            if r then
+                result = { Body = r.Body, StatusCode = r.StatusCode or r.Status, Headers = r.Headers or {} }
+            end
+        end
+    end)
+    if result then return result end
+    pcall(function()
+        if method == "GET" then
+            result = { Body = game:HttpGet(url), StatusCode = 200, Headers = {} }
+        end
+    end)
+    return result
+end
+
+local function GetChatUsername()
+    if UserData.LoggedIn and UserData.Username and UserData.Username ~= "" then
+        return tostring(UserData.Username)
+    end
+    return nil
+end
+
+local function SaveRoomLocal()
+    pcall(function()
+        if HolexEnsureDir then HolexEnsureDir(HOLEX_ROOM_FILE) end
+        writefile(HOLEX_ROOM_FILE, HttpService:JSONEncode({
+            RoomId = CloudChat.RoomId,
+            RoomCode = CloudChat.RoomCode,
+        }))
+    end)
+end
+
+local function LoadRoomLocal()
+    pcall(function()
+        if isfile and isfile(HOLEX_ROOM_FILE) then
+            local d = HttpService:JSONDecode(readfile(HOLEX_ROOM_FILE))
+            if d and d.RoomId then
+                CloudChat.RoomId = d.RoomId
+                CloudChat.RoomCode = d.RoomCode or d.RoomId
+            end
+        end
+    end)
+end
+LoadRoomLocal()
+
+local function EmptyRoomData()
+    return { messages = {}, presence = {}, version = HOLEX_VERSION, updated = os.time() }
+end
+
+local function ExtractBlobId(res)
+    if not res then return nil end
+    local headers = res.Headers or res.headers or {}
+    local loc = headers.Location or headers.location or headers["Location"] or headers["location"]
+    if type(loc) == "string" and loc ~= "" then
+        local id = loc:match("jsonBlob/(.+)$") or loc:match("([^/]+)$")
+        if id and #id > 5 then return id end
+    end
+    if res.Body then
+        local id = tostring(res.Body):match("jsonBlob/([%w%-]+)")
+        if id then return id end
+    end
+    return nil
+end
+
+local function CloudGet()
+    if not CloudChat.RoomId then return nil end
+    if tostring(CloudChat.RoomId):find("^local%-") then
+        local data = nil
+        pcall(function()
+            local path = CHAT_FOLDER .. "/room_" .. CloudChat.RoomId .. ".json"
+            if isfile and isfile(path) then
+                data = HttpService:JSONDecode(readfile(path))
+            end
+        end)
+        return data
+    end
+    local res = HolexHttp(JSONBLOB .. "/" .. tostring(CloudChat.RoomId), "GET")
+    if not res or not res.Body then return nil end
+    local data = nil
+    pcall(function() data = HttpService:JSONDecode(res.Body) end)
+    if type(data) ~= "table" then return nil end
+    if type(data.messages) ~= "table" then data.messages = {} end
+    if type(data.presence) ~= "table" then data.presence = {} end
+    return data
+end
+
+local function CloudPut(data)
+    if not CloudChat.RoomId then return false end
+    data.updated = os.time()
+    data.version = HOLEX_VERSION
+    local body = HttpService:JSONEncode(data)
+    if tostring(CloudChat.RoomId):find("^local%-") then
+        pcall(function()
+            writefile(CHAT_FOLDER .. "/room_" .. CloudChat.RoomId .. ".json", body)
+        end)
+        return true
+    end
+    local res = HolexHttp(JSONBLOB .. "/" .. tostring(CloudChat.RoomId), "PUT", body)
+    return res ~= nil
+end
+
+local function CloudCreate()
+    local data = EmptyRoomData()
+    local body = HttpService:JSONEncode(data)
+    local res = HolexHttp(JSONBLOB, "POST", body)
+    local id = ExtractBlobId(res)
+    if not id then
+        id = "local-" .. tostring(math.random(100000, 999999)) .. "-" .. tostring(os.time() % 100000)
+    end
+    CloudChat.RoomId = id
+    local code = id:gsub("%W", "")
+    if #code > 10 then code = code:sub(-10) end
+    CloudChat.RoomCode = string.upper(code)
+    CloudChat.Connected = true
+    SaveRoomLocal()
+    CloudPut(data)
+    return id, CloudChat.RoomCode
+end
+
+local function CloudJoin(roomIdOrCode)
+    roomIdOrCode = tostring(roomIdOrCode or ""):match("^%s*(.-)%s*$")
+    if roomIdOrCode == "" then return false, "Empty code" end
+    CloudChat.RoomId = roomIdOrCode
+    local code = roomIdOrCode:gsub("%W", "")
+    if #code > 10 then code = code:sub(-10) end
+    CloudChat.RoomCode = string.upper(code)
+    CloudChat.Connected = true
+    SaveRoomLocal()
+    local data = CloudGet()
+    if not data then
+        CloudPut(EmptyRoomData())
+    end
+    return true, "Joined room"
+end
+
+local roomInput = chatSec:CreateInput({
+    Title = "Room ID",
+    Placeholder = "Paste full room ID from friend"
+})
+
+local roomStatus = chatSec:CreateParagraph({
+    Title = "Connection",
+    Content = CloudChat.RoomId and ("Saved room: " .. tostring(CloudChat.RoomId)) or "Not connected — Create or Join"
+})
+
+chatSec:CreateButton({
+    Title = "Create Room (share ID with friend)",
+    Description = "New cloud room — works across PCs",
+    Callback = function()
+        if not GetChatUsername() then
+            HolexLib:Notify("Chat", "Log in first", 4, Config.WarningColor)
+            return
+        end
+        HolexLib:Notify("Chat", "Creating room...", 2)
+        local id, code = CloudCreate()
+        if roomStatus and roomStatus.SetValue then
+            roomStatus:SetValue("CONNECTED\nCode: " .. tostring(code) .. "\nID: " .. tostring(id) .. "\nSend the FULL ID to your friend!")
+        end
+        if roomInput then roomInput.Text = tostring(id) end
+        pcall(function()
+            if setclipboard then setclipboard(tostring(id)) end
+            if toclipboard then toclipboard(tostring(id)) end
+        end)
+        HolexLib:Notify("Chat", "Room created — ID copied if possible", 6, Config.SuccessColor)
+    end
+})
+
+chatSec:CreateButton({
+    Title = "Join Room",
+    Description = "Paste the FULL room ID then click",
+    Callback = function()
+        if not GetChatUsername() then
+            HolexLib:Notify("Chat", "Log in first", 4, Config.WarningColor)
+            return
+        end
+        local code = roomInput and roomInput.Text or ""
+        local ok, msg = CloudJoin(code)
+        if roomStatus and roomStatus.SetValue then
+            roomStatus:SetValue(ok and ("CONNECTED\nID: " .. tostring(CloudChat.RoomId)) or ("Failed: " .. tostring(msg)))
+        end
+        HolexLib:Notify("Chat", tostring(msg), 4, ok and Config.SuccessColor or Config.ErrorColor)
+    end
+})
+
+chatSec:CreateButton({
+    Title = "Copy Room ID",
+    Callback = function()
+        if CloudChat.RoomId then
+            pcall(function()
+                if setclipboard then setclipboard(tostring(CloudChat.RoomId)) end
+                if toclipboard then toclipboard(tostring(CloudChat.RoomId)) end
+            end)
+            HolexLib:Notify("Chat", "Copied", 2, Config.SuccessColor)
+        else
+            HolexLib:Notify("Chat", "No room", 2, Config.WarningColor)
+        end
+    end
+})
+
 local ChatContainer = Instance.new("Frame")
-ChatContainer.Name = "HolexChatBox"
-ChatContainer.Size = UDim2.new(1, 0, 0, 380)
+ChatContainer.Size = UDim2.new(1, 0, 0, 360)
 ChatContainer.BackgroundColor3 = Color3.fromRGB(10, 10, 18)
 ChatContainer.BorderSizePixel = 0
 ChatContainer.Parent = chatSec.Content
@@ -6791,22 +7011,19 @@ ChatStatus.Font = Enum.Font.Gotham
 ChatStatus.TextSize = 11
 ChatStatus.TextXAlignment = Enum.TextXAlignment.Left
 ChatStatus.TextColor3 = Config.SubTextColor
-ChatStatus.Text = "..."
+ChatStatus.Text = "Create or Join a room"
 ChatStatus.Parent = ChatContainer
 
 local ChatMsgScroll = Instance.new("ScrollingFrame")
 ChatMsgScroll.Size = UDim2.new(1, -10, 1, -70)
 ChatMsgScroll.Position = UDim2.new(0, 5, 0, 26)
 ChatMsgScroll.BackgroundTransparency = 1
-ChatMsgScroll.CanvasSize = UDim2.new(0, 0, 0, 0)
 ChatMsgScroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
+ChatMsgScroll.CanvasSize = UDim2.new(0, 0, 0, 0)
 ChatMsgScroll.ScrollBarThickness = 4
 ChatMsgScroll.BorderSizePixel = 0
 ChatMsgScroll.Parent = ChatContainer
-
-local ChatMsgLayout = Instance.new("UIListLayout", ChatMsgScroll)
-ChatMsgLayout.Padding = UDim.new(0, 4)
-ChatMsgLayout.SortOrder = Enum.SortOrder.LayoutOrder
+Instance.new("UIListLayout", ChatMsgScroll).Padding = UDim.new(0, 4)
 
 local ChatInputBar = Instance.new("Frame")
 ChatInputBar.Size = UDim2.new(1, -10, 0, 36)
@@ -6820,13 +7037,13 @@ local ChatMsgInput = Instance.new("TextBox")
 ChatMsgInput.Size = UDim2.new(1, -80, 1, -8)
 ChatMsgInput.Position = UDim2.new(0, 8, 0, 4)
 ChatMsgInput.BackgroundTransparency = 1
-ChatMsgInput.Text = ""
-ChatMsgInput.PlaceholderText = "Type message (must be logged in)..."
+ChatMsgInput.PlaceholderText = "Type message..."
 ChatMsgInput.PlaceholderColor3 = Color3.fromRGB(120, 120, 140)
 ChatMsgInput.Font = Enum.Font.Gotham
 ChatMsgInput.TextSize = 13
 ChatMsgInput.TextColor3 = Color3.fromRGB(235, 235, 245)
 ChatMsgInput.TextXAlignment = Enum.TextXAlignment.Left
+ChatMsgInput.Text = ""
 ChatMsgInput.ClearTextOnFocus = false
 ChatMsgInput.Parent = ChatInputBar
 
@@ -6841,13 +7058,6 @@ ChatSendBtn.TextColor3 = Color3.new(1, 1, 1)
 ChatSendBtn.Parent = ChatInputBar
 Instance.new("UICorner", ChatSendBtn).CornerRadius = UDim.new(0, 6)
 
-local function GetChatUsername()
-    if UserData.LoggedIn and UserData.Username and UserData.Username ~= "" then
-        return tostring(UserData.Username)
-    end
-    return nil
-end
-
 local function addChatMsg(user, msg, color, stamp)
     local lbl = Instance.new("TextLabel")
     lbl.Size = UDim2.new(1, -8, 0, 0)
@@ -6860,12 +7070,12 @@ local function addChatMsg(user, msg, color, stamp)
     lbl.TextXAlignment = Enum.TextXAlignment.Left
     lbl.TextColor3 = Color3.new(1, 1, 1)
     color = color or Config.AccentColor
-    local hex = string.format("#%02X%02X%02X",
-        math.floor((color.R or 0) * 255),
-        math.floor((color.G or 0) * 255),
-        math.floor((color.B or 0) * 255))
-    local timeStr = stamp and (" <font color=\"#777788\">" .. os.date("%H:%M", tonumber(stamp) or os.time()) .. "</font>") or ""
-    lbl.Text = string.format('<font color="%s"><b>%s</b></font>%s: %s', hex, tostring(user), timeStr, tostring(msg))
+    local hex = string.format("#%02X%02X%02X", math.floor(color.R * 255), math.floor(color.G * 255), math.floor(color.B * 255))
+    local t = ""
+    if stamp then
+        t = string.format(' <font color="#777788">%s</font>', os.date("%H:%M", stamp))
+    end
+    lbl.Text = string.format('<font color="%s"><b>%s</b></font>%s: %s', hex, tostring(user), t, tostring(msg))
     lbl.Parent = ChatMsgScroll
     task.defer(function()
         pcall(function()
@@ -6874,239 +7084,161 @@ local function addChatMsg(user, msg, color, stamp)
     end)
 end
 
-local function filterMessage(msg)
-    local bad = {"pedophile", "pedo", "rape", "molest", "groom", "underage"}
-    local lower = tostring(msg):lower()
-    for _, w in ipairs(bad) do
-        if lower:find(w, 1, true) then return false, "Blocked content" end
-    end
-    if #tostring(msg) > 400 then return false, "Too long (max 400)" end
-    return true, msg
-end
-
-local function LoadChatFile()
-    local data = { messages = {} }
-    pcall(function()
-        if HolexEnsureDir then HolexEnsureDir(HOLEX_CHAT_FILE) end
-        if isfile and isfile(HOLEX_CHAT_FILE) then
-            local d = HttpService:JSONDecode(readfile(HOLEX_CHAT_FILE))
-            if type(d) == "table" then data = d end
-        end
-    end)
-    if type(data.messages) ~= "table" then data.messages = {} end
-    return data
-end
-
-local function SaveChatFile(data)
-    pcall(function()
-        if HolexEnsureDir then HolexEnsureDir(HOLEX_CHAT_FILE) end
-        if isfolder and not isfolder(CHAT_FOLDER) then pcall(makefolder, CHAT_FOLDER) end
-        writefile(HOLEX_CHAT_FILE, HttpService:JSONEncode(data))
-    end)
-end
-
 local function MsgKey(m)
     return tostring(m.t) .. "|" .. tostring(m.u) .. "|" .. tostring(m.m)
 end
 
-local function RenderNewMessages()
-    local data = LoadChatFile()
-    local msgs = data.messages or {}
-    for _, m in ipairs(msgs) do
+getgenv().HolexCloudPresence = getgenv().HolexCloudPresence or {}
+getgenv().HolexSeenUsers = getgenv().HolexSeenUsers or {}
+
+local function PublishPresence(data)
+    data = data or EmptyRoomData()
+    local uname = GetChatUsername()
+    if not uname then return data end
+    data.presence = data.presence or {}
+    data.presence[uname] = {
+        username = uname,
+        display = Player.DisplayName,
+        userid = Player.UserId,
+        lastSeen = os.time(),
+        version = HOLEX_VERSION,
+        hub = "HolexScriptHubV14",
+    }
+    getgenv().HolexCloudPresence = data.presence
+    getgenv().HolexSeenUsers[string.lower(uname)] = {
+        username = uname,
+        at = os.time(),
+        source = "cloud",
+        version = HOLEX_VERSION,
+    }
+    return data
+end
+
+local function SyncFromCloud()
+    if not CloudChat.RoomId or not CloudChat.Connected then return end
+    local data = CloudGet()
+    if not data then
+        ChatStatus.Text = "Waiting for cloud..."
+        ChatStatus.TextColor3 = Config.WarningColor
+        return
+    end
+    if type(data.presence) == "table" then
+        getgenv().HolexCloudPresence = data.presence
+        local now = os.time()
+        for uname, p in pairs(data.presence) do
+            if type(p) == "table" and now - (p.lastSeen or 0) <= 45 then
+                getgenv().HolexSeenUsers[string.lower(tostring(uname))] = {
+                    username = uname,
+                    at = p.lastSeen or now,
+                    source = "cloud",
+                    version = p.version or HOLEX_VERSION,
+                }
+            end
+        end
+    end
+    for _, m in ipairs(data.messages or {}) do
         local k = MsgKey(m)
-        if not ChatState.LastIds[k] then
-            ChatState.LastIds[k] = true
+        if not CloudChat.SeenKeys[k] then
+            CloudChat.SeenKeys[k] = true
             local c = Config.AccentColor
             if type(m.c) == "string" then
-                local r, g, b = m.c:match("(%d+),(%d+),(%d+)")
-                if r then c = Color3.fromRGB(tonumber(r), tonumber(g), tonumber(b)) end
+                local r, g, b = string.match(m.c, "(%d+),(%d+),(%d+)")
+                if r then
+                    c = Color3.fromRGB(tonumber(r), tonumber(g), tonumber(b))
+                end
             end
             addChatMsg(m.u or "?", m.m or "", c, m.t)
         end
     end
-    ChatState.LastCount = #msgs
-    local uname = GetChatUsername()
-    ChatStatus.Text = uname and ("Logged in as " .. uname .. " · " .. #msgs .. " msgs · live") or "Not logged in — log in to chat"
-    ChatStatus.TextColor3 = uname and Config.SuccessColor or Config.WarningColor
-end
-
--- Mark that a Holex username is online (used by friends list)
-getgenv().HolexSeenUsers = getgenv().HolexSeenUsers or {}
-local function MarkHolexUserSeen(username, source)
-    if not username or username == "" then return end
-    getgenv().HolexSeenUsers[username:lower()] = {
-        username = username,
-        at = os.time(),
-        source = source or "chat",
-        version = HOLEX_VERSION
-    }
-end
-
-local function BroadcastServerChat(uname, msg)
-    -- Same Roblox server: other Holex clients listening to Player.Chatted will pick this up
-    pcall(function()
-        local payload = HOLEX_CHAT_PREFIX .. " " .. uname .. ": " .. msg
-        local tcs = game:GetService("TextChatService")
-        if tcs and tcs.ChatVersion == Enum.ChatVersion.TextChatService then
-            local channel = tcs.TextChannels and (tcs.TextChannels:FindFirstChild("RBXGeneral") or tcs.TextChannels:FindFirstChild("RBXSystem"))
-            if channel and channel.SendAsync then
-                channel:SendAsync(payload)
-                return
-            end
+    local nOnline = 0
+    for _, p in pairs(data.presence or {}) do
+        if type(p) == "table" and os.time() - (p.lastSeen or 0) <= 45 then
+            nOnline = nOnline + 1
         end
-        -- Legacy chat
-        local sc = game:GetService("StarterGui")
-        pcall(function()
-            local chat = game:GetService("Chat")
-            if chat and chat.Chat then
-                -- no local send on Chat service
-            end
-        end)
-        pcall(function()
-            Players:Chat(payload)
-        end)
-        pcall(function()
-            if LocalPlayer and LocalPlayer.Character then
-                -- fallback display only
-            end
-        end)
-        -- Default chat bar
-        pcall(function()
-            game:GetService("ReplicatedStorage"):WaitForChild("DefaultChatSystemChatEvents", 1)
-                :WaitForChild("SayMessageRequest", 1):FireServer(payload, "All")
-        end)
-    end)
-end
-
-local function HandleIncomingHolexChat(fromName, text)
-    if not text or not fromName then return end
-    if not tostring(text):find(HOLEX_CHAT_PREFIX, 1, true) then return end
-    -- Parse: [Holex] username: message
-    local body = tostring(text):gsub("^%s*" .. HOLEX_CHAT_PREFIX:gsub("%[", "%%["):gsub("%]", "%%]") .. "%s*", "")
-    local u, m = body:match("^([^:]+):%s*(.+)$")
-    if not u or not m then
-        u, m = fromName, body
     end
-    u = u:match("^%s*(.-)%s*$")
-    m = m:match("^%s*(.-)%s*$")
-    if not m or m == "" then return end
-    if u:lower() == (GetChatUsername() or ""):lower() then return end -- already shown locally
-    MarkHolexUserSeen(u, "server")
-    local entry = {
-        u = u, m = m,
-        c = "100,200,255",
-        t = os.time(),
-        via = "server"
-    }
-    local data = LoadChatFile()
-    table.insert(data.messages, entry)
-    while #data.messages > 100 do table.remove(data.messages, 1) end
-    SaveChatFile(data)
-    local k = MsgKey(entry)
-    if not ChatState.LastIds[k] then
-        ChatState.LastIds[k] = true
-        addChatMsg(u, m, Color3.fromRGB(100, 200, 255), entry.t)
-    end
+    local uname = GetChatUsername() or "?"
+    ChatStatus.Text = string.format("Room %s | %s | %d online | %d msgs", tostring(CloudChat.RoomCode), uname, nOnline, #(data.messages or {}))
+    ChatStatus.TextColor3 = Config.SuccessColor
 end
-
--- Listen for other players in this Roblox server
-pcall(function()
-    Players.PlayerChatted:Connect(function(chatType, player, message)
-        pcall(HandleIncomingHolexChat, player and player.Name, message)
-    end)
-end)
-pcall(function()
-    local tcs = game:GetService("TextChatService")
-    if tcs and tcs.MessageReceived then
-        tcs.MessageReceived:Connect(function(msg)
-            pcall(function()
-                local src = msg.TextSource
-                local name = src and src.Name or "?"
-                HandleIncomingHolexChat(name, msg.Text)
-            end)
-        end)
-    end
-end)
-for _, plr in ipairs(Players:GetPlayers()) do
-    pcall(function()
-        plr.Chatted:Connect(function(msg)
-            HandleIncomingHolexChat(plr.Name, msg)
-        end)
-    end)
-end
-Players.PlayerAdded:Connect(function(plr)
-    plr.Chatted:Connect(function(msg)
-        HandleIncomingHolexChat(plr.Name, msg)
-    end)
-end)
 
 local function sendMsg()
     local uname = GetChatUsername()
     if not uname then
-        addChatMsg("SYSTEM", "Log in with a Holex account to chat.", Config.WarningColor)
+        addChatMsg("SYSTEM", "Log in with a Holex account first.", Config.WarningColor)
         return
     end
-    local txt = (ChatMsgInput.Text or ""):match("^%s*(.-)%s*$")
+    if not CloudChat.RoomId or not CloudChat.Connected then
+        addChatMsg("SYSTEM", "Create or Join a room first.", Config.WarningColor)
+        return
+    end
+    local txt = string.match(ChatMsgInput.Text or "", "^%s*(.-)%s*$")
     if not txt or txt == "" then return end
     ChatMsgInput.Text = ""
-    local ok, filtered = filterMessage(txt)
-    if not ok then
-        addChatMsg("SYSTEM", filtered, Config.ErrorColor)
+    if #txt > 400 then
+        addChatMsg("SYSTEM", "Too long (max 400)", Config.ErrorColor)
         return
     end
-    MarkHolexUserSeen(uname, "self")
     local col = Config.AccentColor
     local entry = {
         u = uname,
-        m = filtered,
-        c = string.format("%d,%d,%d", math.floor(col.R*255), math.floor(col.G*255), math.floor(col.B*255)),
+        m = txt,
+        c = string.format("%d,%d,%d", math.floor(col.R * 255), math.floor(col.G * 255), math.floor(col.B * 255)),
         t = os.time(),
-        uid = Player.UserId
+        uid = Player.UserId,
     }
-    local data = LoadChatFile()
+    local data = CloudGet() or EmptyRoomData()
+    data.messages = data.messages or {}
     table.insert(data.messages, entry)
-    while #data.messages > 100 do table.remove(data.messages, 1) end
-    SaveChatFile(data)
-    ChatState.LastIds[MsgKey(entry)] = true
-    addChatMsg(uname, filtered, col, entry.t)
-    BroadcastServerChat(uname, filtered)
-    ChatStatus.Text = "Logged in as " .. uname .. " · sent"
-    HolexLogger:Info("CHAT", uname .. ": " .. filtered)
+    while #data.messages > 80 do
+        table.remove(data.messages, 1)
+    end
+    data = PublishPresence(data)
+    CloudPut(data)
+    CloudChat.SeenKeys[MsgKey(entry)] = true
+    addChatMsg(uname, txt, col, entry.t)
+    HolexLogger:Info("CHAT", uname .. ": " .. txt)
 end
 
 ChatSendBtn.MouseButton1Click:Connect(sendMsg)
-ChatMsgInput.FocusLost:Connect(function(enter) if enter then sendMsg() end end)
+ChatMsgInput.FocusLost:Connect(function(enter)
+    if enter then sendMsg() end
+end)
 
 chatSec:CreateButton({
-    Title = "🔄 Refresh Chat",
+    Title = "Force Sync Now",
     Callback = function()
-        RenderNewMessages()
-        HolexLib:Notify("Chat", "Refreshed", 2, Config.SuccessColor)
+        SyncFromCloud()
+        HolexLib:Notify("Chat", "Synced", 2, Config.SuccessColor)
     end
 })
 
 task.spawn(function()
-    task.wait(0.4)
-    pcall(RenderNewMessages)
-    if GetChatUsername() then
-        addChatMsg("SYSTEM", "Welcome " .. GetChatUsername() .. "! Friends in this server using Holex will see your messages.", Config.SuccessColor)
-        MarkHolexUserSeen(GetChatUsername(), "self")
+    task.wait(0.5)
+    if CloudChat.RoomId then
+        CloudChat.Connected = true
+        if roomInput then roomInput.Text = tostring(CloudChat.RoomId) end
+        addChatMsg("SYSTEM", "Rejoining room " .. tostring(CloudChat.RoomCode or CloudChat.RoomId), Config.AccentColor)
     else
-        addChatMsg("SYSTEM", "Log in to send messages.", Config.WarningColor)
+        addChatMsg("SYSTEM", "Create a Room and send the FULL ID to your friend.", Config.WarningColor)
     end
     while ChatContainer.Parent do
-        task.wait(2.5)
-        pcall(RenderNewMessages)
-        -- soft presence ping so friends list sees us
-        pcall(function()
-            if GetChatUsername() and getgenv().HolexRegisterPresence then getgenv().HolexRegisterPresence() end
-        end)
+        if CloudChat.Connected and CloudChat.RoomId and GetChatUsername() then
+            pcall(function()
+                local data = CloudGet() or EmptyRoomData()
+                data = PublishPresence(data)
+                CloudPut(data)
+            end)
+            pcall(SyncFromCloud)
+        end
+        task.wait(2)
     end
 end)
 
+getgenv().HolexCloudChat = CloudChat
 getgenv().HolexChatSend = sendMsg
-getgenv().HolexChatRefresh = RenderNewMessages
-getgenv().HolexMarkSeen = MarkHolexUserSeen
+getgenv().HolexChatSync = SyncFromCloud
+getgenv().HolexChatCreateRoom = CloudCreate
+getgenv().HolexChatJoinRoom = CloudJoin
 
 -- ==================== HOLEX FRIENDS TAB ====================
 local FriendsTab = MainWindow:CreateTab("Friends")
@@ -7155,44 +7287,32 @@ frSec:CreateButton({
 local listSec = FriendsTab:CreateSection("Your Holex Friends")
 local function refreshFriendsTabList()
     for _, child in ipairs(listSec.Content:GetChildren()) do
-        if child:IsA("Frame") or child:IsA("TextLabel") or child:IsA("TextButton") then
-            if not child:IsA("UIListLayout") and not child:IsA("UIPadding") then
-                child:Destroy()
-            end
+        if child:IsA("Frame") or (child:IsA("TextLabel") and child.Name == "FriendEntry") then
+            child:Destroy()
         end
     end
     local friends = UserData.HolexFriends or {}
-    local onlineMap = (getgenv().HolexGetOnline and getgenv().HolexGetOnline()) or {}
-    local seen = getgenv().HolexSeenUsers or {}
+    local online = (getgenv().HolexGetOnline and getgenv().HolexGetOnline()) or {}
     local count = 0
     for uname, fdata in pairs(friends) do
         count = count + 1
         local isOnline = false
-        local detail = "Not running Holex right now"
-        local now = os.time()
-        for _, p in pairs(onlineMap) do
-            if type(p) == "table" and p.username and p.username:lower() == uname:lower() then
-                if now - (p.lastSeen or 0) <= 120 then
-                    isOnline = true
-                    detail = "Using Holex Script Hub V14"
-                end
+        for _, p in pairs(online) do
+            if p.username and p.username:lower() == uname:lower() then
+                isOnline = true
+                break
             end
         end
-        local s = seen[uname:lower()]
-        if s and now - (s.at or 0) <= 180 then
-            isOnline = true
-            detail = "Using Holex Script Hub V14 (" .. tostring(s.source or "live") .. ")"
-        end
-        local status = isOnline and "🟢 ONLINE · Holex V14" or "⚫ Offline"
+        local status = isOnline and "🟢 ONLINE" or "⚫ Offline"
         listSec:CreateParagraph({
             Title = uname .. "  " .. status,
-            Content = detail .. "\nAdded: " .. os.date("%Y-%m-%d", fdata.addedAt or os.time())
+            Content = "Added: " .. os.date("%Y-%m-%d", fdata.addedAt or 0)
         })
     end
     if count == 0 then
         listSec:CreateParagraph({
             Title = "No friends yet",
-            Content = "Add Holex users above. Green = online and using Holex V14."
+            Content = "Add Holex users above. They must be running Holex V14 and logged in."
         })
     end
 end
@@ -10345,48 +10465,55 @@ local function ShowMainUI()
     -- Register ourselves as online Holex user
     local function RegisterHolexPresence()
         pcall(function()
-            if HolexEnsureDir then HolexEnsureDir(HOLEX_PRESENCE_FILE) end
-            local uname = UserData.Username or Player.Name
             local presence = {
-                username = uname,
+                username = UserData.Username or Player.Name,
                 display = Player.DisplayName,
                 userid = Player.UserId,
                 lastSeen = os.time(),
                 version = HOLEX_VERSION,
-                hub = "HolexScriptHubV14",
-                city = (NetworkInfo and NetworkInfo.City) or "Unknown",
-                country = (NetworkInfo and NetworkInfo.Country) or "Unknown",
-                placeId = game.PlaceId,
-                jobId = game.JobId
+                city = NetworkInfo.City or "Unknown",
+                country = NetworkInfo.Country or "Unknown"
             }
+            -- Local online list (shared via file for same-machine / same-executor sessions)
             local online = {}
-            if isfile and isfile(HOLEX_PRESENCE_FILE) then
-                pcall(function() online = HttpService:JSONDecode(readfile(HOLEX_PRESENCE_FILE)) or {} end)
+            if isfile(HOLEX_PRESENCE_FILE) then
+                online = HttpService:JSONDecode(readfile(HOLEX_PRESENCE_FILE)) or {}
             end
             online[tostring(Player.UserId)] = presence
-            -- also index by username for easier lookup
-            online["user:" .. tostring(uname):lower()] = presence
+            -- Prune stale (older than 5 minutes)
             local now = os.time()
             for uid, p in pairs(online) do
-                if type(p) == "table" and now - (p.lastSeen or 0) > 120 then
-                    online[uid] = nil -- 2 min = offline
+                if now - (p.lastSeen or 0) > 300 then
+                    online[uid] = nil
                 end
             end
             writefile(HOLEX_PRESENCE_FILE, HttpService:JSONEncode(online))
             UserData.HolexOnlineUsers = online
-            if getgenv().HolexMarkSeen then getgenv().HolexMarkSeen(uname, "presence") end
-            getgenv().HolexSeenUsers = getgenv().HolexSeenUsers or {}
-            getgenv().HolexSeenUsers[tostring(uname):lower()] = {
-                username = uname, at = os.time(), source = "presence", version = HOLEX_VERSION
-            }
         end)
     end
 
     local function GetOnlineHolexUsers()
         local online = {}
         pcall(function()
-            if isfile(HOLEX_PRESENCE_FILE) then
+            if isfile and isfile(HOLEX_PRESENCE_FILE) then
                 online = HttpService:JSONDecode(readfile(HOLEX_PRESENCE_FILE)) or {}
+            end
+        end)
+        pcall(function()
+            local cloud = getgenv().HolexCloudPresence or {}
+            local now = os.time()
+            for uname, p in pairs(cloud) do
+                if type(p) == "table" and now - (p.lastSeen or 0) <= 45 then
+                    online["cloud:" .. string.lower(tostring(uname))] = {
+                        username = p.username or uname,
+                        display = p.display or uname,
+                        userid = p.userid,
+                        lastSeen = p.lastSeen,
+                        version = p.version or HOLEX_VERSION,
+                        hub = "HolexScriptHubV14",
+                        source = "cloud",
+                    }
+                end
             end
         end)
         return online
@@ -10419,50 +10546,18 @@ local function ShowMainUI()
         return false
     end
 
-    local function IsHolexOnline(uname)
-        uname = tostring(uname or ""):lower()
-        if uname == "" then return false, nil end
-        local now = os.time()
-        -- 1) Presence file (same PC / shared HolexData)
-        local online = GetOnlineHolexUsers() or {}
-        for _, p in pairs(online) do
-            if type(p) == "table" and p.username and p.username:lower() == uname then
-                if now - (p.lastSeen or 0) <= 120 then
-                    return true, p
-                end
-            end
-        end
-        -- 2) Seen via Holex chat / presence this session
-        local seen = getgenv().HolexSeenUsers or {}
-        local s = seen[uname]
-        if s and now - (s.at or 0) <= 180 then
-            return true, s
-        end
-        -- 3) Same Roblox server: match friend username to a player, and they used Holex recently
-        for _, plr in ipairs(Players:GetPlayers()) do
-            if plr.Name:lower() == uname or (plr.DisplayName and plr.DisplayName:lower() == uname) then
-                if s and now - (s.at or 0) <= 300 then
-                    return true, { username = plr.Name, display = plr.DisplayName, source = "server" }
-                end
-                -- In server but not confirmed Holex yet
-                return false, { username = plr.Name, display = plr.DisplayName, source = "server_only" }
-            end
-        end
-        return false, nil
-    end
-
     local function refreshFriendsList()
         for _, child in ipairs(FriendsScroll:GetChildren()) do
-            if child:IsA("Frame") or (child:IsA("TextLabel") and not child:IsA("UIListLayout")) then
-                if child.ClassName ~= "UIListLayout" and child.ClassName ~= "UIPadding" then
+            if child:IsA("Frame") or child:IsA("TextLabel") then
+                if not child:IsA("UIListLayout") and not child:IsA("UIPadding") then
                     child:Destroy()
                 end
             end
         end
 
+        local online = GetOnlineHolexUsers()
         local friends = UserData.HolexFriends or {}
-        local count = 0
-        local onlineCount = 0
+        local count, onCount = 0, 0
 
         local header = Instance.new("TextLabel")
         header.Size = UDim2.new(1, 0, 0, 18)
@@ -10475,58 +10570,63 @@ local function ShowMainUI()
         header.Parent = FriendsScroll
 
         for uname, fdata in pairs(friends) do
-            local isOnline, presence = IsHolexOnline(uname)
-            if isOnline then onlineCount = onlineCount + 1 end
+            local isOnline, presence = false, nil
+            for _, p in pairs(online) do
+                if type(p) == "table" and p.username and string.lower(p.username) == string.lower(tostring(uname)) then
+                    if os.time() - (p.lastSeen or 0) <= 45 then
+                        isOnline = true
+                        presence = p
+                        break
+                    end
+                end
+            end
+            if isOnline then onCount = onCount + 1 end
 
             local friendRow = Instance.new("Frame")
-            friendRow.Size = UDim2.new(1, -4, 0, 32)
-            friendRow.BackgroundColor3 = isOnline and Color3.fromRGB(18, 42, 28) or Config.QuaternaryColor
+            friendRow.Size = UDim2.new(1, 0, 0, 30)
+            friendRow.BackgroundColor3 = isOnline and Color3.fromRGB(18, 45, 30) or Config.QuaternaryColor
             friendRow.BorderSizePixel = 0
             friendRow.Parent = FriendsScroll
-            Instance.new("UICorner", friendRow).CornerRadius = UDim.new(0, 6)
+            Instance.new("UICorner", friendRow).CornerRadius = UDim.new(0, 4)
 
-            -- Green icon = online using Holex V14
-            local dot = Instance.new("TextLabel")
-            dot.Size = UDim2.new(0, 18, 1, 0)
-            dot.Position = UDim2.new(0, 4, 0, 0)
-            dot.BackgroundTransparency = 1
-            dot.Text = isOnline and "●" or "○"
-            dot.TextColor3 = isOnline and Color3.fromRGB(50, 220, 100) or Color3.fromRGB(90, 90, 100)
-            dot.Font = Enum.Font.GothamBold
-            dot.TextSize = 14
-            dot.Parent = friendRow
+            local statusDot = Instance.new("Frame")
+            statusDot.Size = UDim2.new(0, 8, 0, 8)
+            statusDot.Position = UDim2.new(0, 4, 0.5, -4)
+            statusDot.BackgroundColor3 = isOnline and Color3.fromRGB(40, 220, 140) or Color3.fromRGB(90, 90, 100)
+            statusDot.BorderSizePixel = 0
+            statusDot.Parent = friendRow
+            Instance.new("UICorner", statusDot).CornerRadius = UDim.new(1, 0)
 
             local fName = Instance.new("TextLabel")
-            fName.Size = UDim2.new(1, -70, 0, 16)
-            fName.Position = UDim2.new(0, 22, 0, 2)
+            fName.Size = UDim2.new(1, -16, 0, 14)
+            fName.Position = UDim2.new(0, 16, 0, 2)
             fName.BackgroundTransparency = 1
             fName.Font = Enum.Font.Gotham
             fName.TextSize = 11
             fName.TextColor3 = Config.TextColor
             fName.TextXAlignment = Enum.TextXAlignment.Left
-            fName.Text = tostring((presence and presence.display) or fdata.display or uname)
+            fName.Text = (presence and presence.display) or (fdata and fdata.display) or uname
             fName.Parent = friendRow
 
             local sub = Instance.new("TextLabel")
-            sub.Size = UDim2.new(1, -70, 0, 12)
-            sub.Position = UDim2.new(0, 22, 0, 16)
+            sub.Size = UDim2.new(1, -16, 0, 12)
+            sub.Position = UDim2.new(0, 16, 0, 15)
             sub.BackgroundTransparency = 1
             sub.Font = Enum.Font.Gotham
             sub.TextSize = 9
             sub.TextXAlignment = Enum.TextXAlignment.Left
             if isOnline then
-                sub.Text = "🟢 Online · Holex V14"
+                sub.Text = "Online - Holex V14"
                 sub.TextColor3 = Color3.fromRGB(80, 220, 120)
             else
                 sub.Text = "Offline"
                 sub.TextColor3 = Config.DimTextColor
             end
             sub.Parent = friendRow
-
             count = count + 1
         end
 
-        header.Text = "  FRIENDS (" .. onlineCount .. " online / " .. count .. ")"
+        header.Text = "  FRIENDS (" .. onCount .. "/" .. count .. " online)"
 
         if count == 0 then
             local empty = Instance.new("TextLabel")
@@ -10536,7 +10636,7 @@ local function ShowMainUI()
             empty.TextSize = 10
             empty.TextColor3 = Config.DimTextColor
             empty.TextWrapped = true
-            empty.Text = "No friends yet.\nAdd them in the Friends tab!"
+            empty.Text = "No friends yet.\nJoin same Chat Room to go online!"
             empty.Parent = FriendsScroll
         end
 
@@ -10551,14 +10651,14 @@ local function ShowMainUI()
             if UserData.LoggedIn then
                 pcall(RegisterHolexPresence)
             end
-            task.wait(8)
+            task.wait(20)
         end
     end)
 
     task.spawn(function()
         while FriendsWidget.Parent do
             pcall(refreshFriendsList)
-            task.wait(5)
+            task.wait(15)
         end
     end)
 
@@ -10567,8 +10667,6 @@ local function ShowMainUI()
     getgenv().HolexRemoveFriend = RemoveHolexFriend
     getgenv().HolexRefreshFriends = refreshFriendsList
     getgenv().HolexGetOnline = GetOnlineHolexUsers
-    getgenv().HolexRegisterPresence = RegisterHolexPresence
-    getgenv().HolexIsOnline = IsHolexOnline
 
     local MusicWidget = Utilities:Create("Frame", {
         BackgroundColor3 = Config.TertiaryColor,
