@@ -887,8 +887,7 @@ local UserData = {
     IsOwner = false,
     ProfilePic = "",
     Friends = {},
-    HolexFriends = {},  -- {username = {id=..., display=..., lastSeen=..., status=accepted}}
-    FriendRequests = { Incoming = {}, Outgoing = {} },  -- pending requests
+    HolexFriends = {},  -- {username = {id=..., display=..., lastSeen=...}}
     HolexOnlineUsers = {},
     SavedScripts = {},
     Settings = {},
@@ -6764,33 +6763,55 @@ local ChatTab = MainWindow:CreateTab("GlobalChat")
 local chatSec = ChatTab:CreateSection("Global Chat")
 chatSec:CreateParagraph({
     Title = "Holex Global Chat",
-    Content = "Embedded chat. Be respectful!\nNo swearing, harassment, or personal info.\nViolations result in bans."
+    Content = "Chat with your Holex account.\n• Same PC: shared HolexData/chat\n• Same Roblox server: live [Holex] bridge\nFriends running Holex V14 see green ONLINE."
 })
 
+local HOLEX_CHAT_FILE = CHAT_FOLDER .. "/global_chat.json"
+local HOLEX_CHAT_PREFIX = "[Holex]"
+local ChatState = { LastIds = {}, LastCount = 0 }
+
+pcall(function()
+    if HolexEnsureDir then HolexEnsureDir(HOLEX_CHAT_FILE) end
+    if isfolder and not isfolder(CHAT_FOLDER) then makefolder(CHAT_FOLDER) end
+end)
+
 local ChatContainer = Instance.new("Frame")
-ChatContainer.Size = UDim2.new(1, 0, 0, 350)
+ChatContainer.Name = "HolexChatBox"
+ChatContainer.Size = UDim2.new(1, 0, 0, 380)
 ChatContainer.BackgroundColor3 = Color3.fromRGB(10, 10, 18)
 ChatContainer.BorderSizePixel = 0
 ChatContainer.Parent = chatSec.Content
 Instance.new("UICorner", ChatContainer).CornerRadius = UDim.new(0, 8)
 
+local ChatStatus = Instance.new("TextLabel")
+ChatStatus.Size = UDim2.new(1, -12, 0, 20)
+ChatStatus.Position = UDim2.new(0, 6, 0, 4)
+ChatStatus.BackgroundTransparency = 1
+ChatStatus.Font = Enum.Font.Gotham
+ChatStatus.TextSize = 11
+ChatStatus.TextXAlignment = Enum.TextXAlignment.Left
+ChatStatus.TextColor3 = Config.SubTextColor
+ChatStatus.Text = "..."
+ChatStatus.Parent = ChatContainer
+
 local ChatMsgScroll = Instance.new("ScrollingFrame")
-ChatMsgScroll.Size = UDim2.new(1, -10, 1, -50)
-ChatMsgScroll.Position = UDim2.new(0, 5, 0, 5)
+ChatMsgScroll.Size = UDim2.new(1, -10, 1, -70)
+ChatMsgScroll.Position = UDim2.new(0, 5, 0, 26)
 ChatMsgScroll.BackgroundTransparency = 1
 ChatMsgScroll.CanvasSize = UDim2.new(0, 0, 0, 0)
 ChatMsgScroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
-ChatMsgScroll.ScrollBarThickness = 3
+ChatMsgScroll.ScrollBarThickness = 4
+ChatMsgScroll.BorderSizePixel = 0
 ChatMsgScroll.Parent = ChatContainer
 
 local ChatMsgLayout = Instance.new("UIListLayout", ChatMsgScroll)
-ChatMsgLayout.Padding = UDim.new(0, 3)
+ChatMsgLayout.Padding = UDim.new(0, 4)
 ChatMsgLayout.SortOrder = Enum.SortOrder.LayoutOrder
 
 local ChatInputBar = Instance.new("Frame")
 ChatInputBar.Size = UDim2.new(1, -10, 0, 36)
-ChatInputBar.Position = UDim2.new(0, 5, 0, 305)
-ChatInputBar.BackgroundColor3 = Color3.fromRGB(20, 20, 30)
+ChatInputBar.Position = UDim2.new(0, 5, 1, -42)
+ChatInputBar.BackgroundColor3 = Color3.fromRGB(20, 22, 32)
 ChatInputBar.BorderSizePixel = 0
 ChatInputBar.Parent = ChatContainer
 Instance.new("UICorner", ChatInputBar).CornerRadius = UDim.new(0, 6)
@@ -6800,18 +6821,18 @@ ChatMsgInput.Size = UDim2.new(1, -80, 1, -8)
 ChatMsgInput.Position = UDim2.new(0, 8, 0, 4)
 ChatMsgInput.BackgroundTransparency = 1
 ChatMsgInput.Text = ""
-ChatMsgInput.PlaceholderText = "Type message..."
-ChatMsgInput.PlaceholderColor3 = Color3.fromRGB(120, 120, 130)
+ChatMsgInput.PlaceholderText = "Type message (must be logged in)..."
+ChatMsgInput.PlaceholderColor3 = Color3.fromRGB(120, 120, 140)
 ChatMsgInput.Font = Enum.Font.Gotham
-ChatMsgInput.TextSize = 14
-ChatMsgInput.TextColor3 = Color3.fromRGB(230, 230, 240)
+ChatMsgInput.TextSize = 13
+ChatMsgInput.TextColor3 = Color3.fromRGB(235, 235, 245)
 ChatMsgInput.TextXAlignment = Enum.TextXAlignment.Left
 ChatMsgInput.ClearTextOnFocus = false
 ChatMsgInput.Parent = ChatInputBar
 
 local ChatSendBtn = Instance.new("TextButton")
 ChatSendBtn.Size = UDim2.new(0, 65, 0, 28)
-ChatSendBtn.Position = UDim2.new(1, -73, 0.5, -14)
+ChatSendBtn.Position = UDim2.new(1, -72, 0.5, -14)
 ChatSendBtn.BackgroundColor3 = Config.AccentColor
 ChatSendBtn.Text = "Send"
 ChatSendBtn.Font = Enum.Font.GothamBold
@@ -6820,7 +6841,14 @@ ChatSendBtn.TextColor3 = Color3.new(1, 1, 1)
 ChatSendBtn.Parent = ChatInputBar
 Instance.new("UICorner", ChatSendBtn).CornerRadius = UDim.new(0, 6)
 
-local function addChatMsg(user, msg, color)
+local function GetChatUsername()
+    if UserData.LoggedIn and UserData.Username and UserData.Username ~= "" then
+        return tostring(UserData.Username)
+    end
+    return nil
+end
+
+local function addChatMsg(user, msg, color, stamp)
     local lbl = Instance.new("TextLabel")
     lbl.Size = UDim2.new(1, -8, 0, 0)
     lbl.AutomaticSize = Enum.AutomaticSize.Y
@@ -6828,268 +6856,354 @@ local function addChatMsg(user, msg, color)
     lbl.TextWrapped = true
     lbl.RichText = true
     lbl.Font = Enum.Font.Gotham
-    lbl.TextSize = 14
+    lbl.TextSize = 13
     lbl.TextXAlignment = Enum.TextXAlignment.Left
-    lbl.TextYAlignment = Enum.TextYAlignment.Top
     lbl.TextColor3 = Color3.new(1, 1, 1)
-    local hex = string.format("#%02X%02X%02X", math.floor(color.R * 255), math.floor(color.G * 255), math.floor(color.B * 255))
-    lbl.Text = string.format('<font color="%s"><b>%s</b></font>: %s', hex, user, msg)
+    color = color or Config.AccentColor
+    local hex = string.format("#%02X%02X%02X",
+        math.floor((color.R or 0) * 255),
+        math.floor((color.G or 0) * 255),
+        math.floor((color.B or 0) * 255))
+    local timeStr = stamp and (" <font color=\"#777788\">" .. os.date("%H:%M", tonumber(stamp) or os.time()) .. "</font>") or ""
+    lbl.Text = string.format('<font color="%s"><b>%s</b></font>%s: %s', hex, tostring(user), timeStr, tostring(msg))
     lbl.Parent = ChatMsgScroll
-    task.wait(0.05)
-    ChatMsgScroll.CanvasPosition = Vector2.new(0, ChatMsgScroll.AbsoluteCanvasSize.Y)
+    task.defer(function()
+        pcall(function()
+            ChatMsgScroll.CanvasPosition = Vector2.new(0, ChatMsgScroll.AbsoluteCanvasSize.Y)
+        end)
+    end)
 end
 
-local badWords = {"pedophile", "pedo", "rape", "molest", "groom", "underage"}
 local function filterMessage(msg)
-    local lower = msg:lower()
-    for _, word in ipairs(badWords) do
-        if lower:find(word) then
-            return false, "Message contains prohibited content."
-        end
+    local bad = {"pedophile", "pedo", "rape", "molest", "groom", "underage"}
+    local lower = tostring(msg):lower()
+    for _, w in ipairs(bad) do
+        if lower:find(w, 1, true) then return false, "Blocked content" end
     end
+    if #tostring(msg) > 400 then return false, "Too long (max 400)" end
     return true, msg
 end
 
+local function LoadChatFile()
+    local data = { messages = {} }
+    pcall(function()
+        if HolexEnsureDir then HolexEnsureDir(HOLEX_CHAT_FILE) end
+        if isfile and isfile(HOLEX_CHAT_FILE) then
+            local d = HttpService:JSONDecode(readfile(HOLEX_CHAT_FILE))
+            if type(d) == "table" then data = d end
+        end
+    end)
+    if type(data.messages) ~= "table" then data.messages = {} end
+    return data
+end
+
+local function SaveChatFile(data)
+    pcall(function()
+        if HolexEnsureDir then HolexEnsureDir(HOLEX_CHAT_FILE) end
+        if isfolder and not isfolder(CHAT_FOLDER) then pcall(makefolder, CHAT_FOLDER) end
+        writefile(HOLEX_CHAT_FILE, HttpService:JSONEncode(data))
+    end)
+end
+
+local function MsgKey(m)
+    return tostring(m.t) .. "|" .. tostring(m.u) .. "|" .. tostring(m.m)
+end
+
+local function RenderNewMessages()
+    local data = LoadChatFile()
+    local msgs = data.messages or {}
+    for _, m in ipairs(msgs) do
+        local k = MsgKey(m)
+        if not ChatState.LastIds[k] then
+            ChatState.LastIds[k] = true
+            local c = Config.AccentColor
+            if type(m.c) == "string" then
+                local r, g, b = m.c:match("(%d+),(%d+),(%d+)")
+                if r then c = Color3.fromRGB(tonumber(r), tonumber(g), tonumber(b)) end
+            end
+            addChatMsg(m.u or "?", m.m or "", c, m.t)
+        end
+    end
+    ChatState.LastCount = #msgs
+    local uname = GetChatUsername()
+    ChatStatus.Text = uname and ("Logged in as " .. uname .. " · " .. #msgs .. " msgs · live") or "Not logged in — log in to chat"
+    ChatStatus.TextColor3 = uname and Config.SuccessColor or Config.WarningColor
+end
+
+-- Mark that a Holex username is online (used by friends list)
+getgenv().HolexSeenUsers = getgenv().HolexSeenUsers or {}
+local function MarkHolexUserSeen(username, source)
+    if not username or username == "" then return end
+    getgenv().HolexSeenUsers[username:lower()] = {
+        username = username,
+        at = os.time(),
+        source = source or "chat",
+        version = HOLEX_VERSION
+    }
+end
+
+local function BroadcastServerChat(uname, msg)
+    -- Same Roblox server: other Holex clients listening to Player.Chatted will pick this up
+    pcall(function()
+        local payload = HOLEX_CHAT_PREFIX .. " " .. uname .. ": " .. msg
+        local tcs = game:GetService("TextChatService")
+        if tcs and tcs.ChatVersion == Enum.ChatVersion.TextChatService then
+            local channel = tcs.TextChannels and (tcs.TextChannels:FindFirstChild("RBXGeneral") or tcs.TextChannels:FindFirstChild("RBXSystem"))
+            if channel and channel.SendAsync then
+                channel:SendAsync(payload)
+                return
+            end
+        end
+        -- Legacy chat
+        local sc = game:GetService("StarterGui")
+        pcall(function()
+            local chat = game:GetService("Chat")
+            if chat and chat.Chat then
+                -- no local send on Chat service
+            end
+        end)
+        pcall(function()
+            Players:Chat(payload)
+        end)
+        pcall(function()
+            if LocalPlayer and LocalPlayer.Character then
+                -- fallback display only
+            end
+        end)
+        -- Default chat bar
+        pcall(function()
+            game:GetService("ReplicatedStorage"):WaitForChild("DefaultChatSystemChatEvents", 1)
+                :WaitForChild("SayMessageRequest", 1):FireServer(payload, "All")
+        end)
+    end)
+end
+
+local function HandleIncomingHolexChat(fromName, text)
+    if not text or not fromName then return end
+    if not tostring(text):find(HOLEX_CHAT_PREFIX, 1, true) then return end
+    -- Parse: [Holex] username: message
+    local body = tostring(text):gsub("^%s*" .. HOLEX_CHAT_PREFIX:gsub("%[", "%%["):gsub("%]", "%%]") .. "%s*", "")
+    local u, m = body:match("^([^:]+):%s*(.+)$")
+    if not u or not m then
+        u, m = fromName, body
+    end
+    u = u:match("^%s*(.-)%s*$")
+    m = m:match("^%s*(.-)%s*$")
+    if not m or m == "" then return end
+    if u:lower() == (GetChatUsername() or ""):lower() then return end -- already shown locally
+    MarkHolexUserSeen(u, "server")
+    local entry = {
+        u = u, m = m,
+        c = "100,200,255",
+        t = os.time(),
+        via = "server"
+    }
+    local data = LoadChatFile()
+    table.insert(data.messages, entry)
+    while #data.messages > 100 do table.remove(data.messages, 1) end
+    SaveChatFile(data)
+    local k = MsgKey(entry)
+    if not ChatState.LastIds[k] then
+        ChatState.LastIds[k] = true
+        addChatMsg(u, m, Color3.fromRGB(100, 200, 255), entry.t)
+    end
+end
+
+-- Listen for other players in this Roblox server
+pcall(function()
+    Players.PlayerChatted:Connect(function(chatType, player, message)
+        pcall(HandleIncomingHolexChat, player and player.Name, message)
+    end)
+end)
+pcall(function()
+    local tcs = game:GetService("TextChatService")
+    if tcs and tcs.MessageReceived then
+        tcs.MessageReceived:Connect(function(msg)
+            pcall(function()
+                local src = msg.TextSource
+                local name = src and src.Name or "?"
+                HandleIncomingHolexChat(name, msg.Text)
+            end)
+        end)
+    end
+end)
+for _, plr in ipairs(Players:GetPlayers()) do
+    pcall(function()
+        plr.Chatted:Connect(function(msg)
+            HandleIncomingHolexChat(plr.Name, msg)
+        end)
+    end)
+end
+Players.PlayerAdded:Connect(function(plr)
+    plr.Chatted:Connect(function(msg)
+        HandleIncomingHolexChat(plr.Name, msg)
+    end)
+end)
+
 local function sendMsg()
-    local txt = ChatMsgInput.Text:match("^%s*(.-)%s*$")
-    if txt == "" then return end
+    local uname = GetChatUsername()
+    if not uname then
+        addChatMsg("SYSTEM", "Log in with a Holex account to chat.", Config.WarningColor)
+        return
+    end
+    local txt = (ChatMsgInput.Text or ""):match("^%s*(.-)%s*$")
+    if not txt or txt == "" then return end
     ChatMsgInput.Text = ""
     local ok, filtered = filterMessage(txt)
     if not ok then
         addChatMsg("SYSTEM", filtered, Config.ErrorColor)
-        IssueBan(UserData.Username, 1, "Inappropriate content in chat")
         return
     end
-    addChatMsg(UserData.Username, filtered, Config.AccentColor)
-    pcall(function()
-        local path = CHAT_FOLDER .. "/global_chat.json"
-        local data = {messages = {}}
-        if isfile(path) then data = HttpService:JSONDecode(readfile(path)) end
-        table.insert(data.messages, {
-            u = UserData.Username, m = filtered,
-            c = string.format("%d,%d,%d", math.floor(Config.AccentColor.R * 255), math.floor(Config.AccentColor.G * 255), math.floor(Config.AccentColor.B * 255)),
-            t = os.time()
-        })
-        while #data.messages > 50 do table.remove(data.messages, 1) end
-        writefile(path, HttpService:JSONEncode(data))
-    end)
+    MarkHolexUserSeen(uname, "self")
+    local col = Config.AccentColor
+    local entry = {
+        u = uname,
+        m = filtered,
+        c = string.format("%d,%d,%d", math.floor(col.R*255), math.floor(col.G*255), math.floor(col.B*255)),
+        t = os.time(),
+        uid = Player.UserId
+    }
+    local data = LoadChatFile()
+    table.insert(data.messages, entry)
+    while #data.messages > 100 do table.remove(data.messages, 1) end
+    SaveChatFile(data)
+    ChatState.LastIds[MsgKey(entry)] = true
+    addChatMsg(uname, filtered, col, entry.t)
+    BroadcastServerChat(uname, filtered)
+    ChatStatus.Text = "Logged in as " .. uname .. " · sent"
+    HolexLogger:Info("CHAT", uname .. ": " .. filtered)
 end
 
 ChatSendBtn.MouseButton1Click:Connect(sendMsg)
 ChatMsgInput.FocusLost:Connect(function(enter) if enter then sendMsg() end end)
 
+chatSec:CreateButton({
+    Title = "🔄 Refresh Chat",
+    Callback = function()
+        RenderNewMessages()
+        HolexLib:Notify("Chat", "Refreshed", 2, Config.SuccessColor)
+    end
+})
+
 task.spawn(function()
-    pcall(function()
-        local path = CHAT_FOLDER .. "/global_chat.json"
-        if isfile(path) then
-            local data = HttpService:JSONDecode(readfile(path))
-            for _, m in ipairs(data.messages) do
-                local parts = m.c:split(",")
-                local c = Color3.fromRGB(tonumber(parts[1]), tonumber(parts[2]), tonumber(parts[3]))
-                addChatMsg(m.u, m.m, c)
-            end
-        end
-    end)
+    task.wait(0.4)
+    pcall(RenderNewMessages)
+    if GetChatUsername() then
+        addChatMsg("SYSTEM", "Welcome " .. GetChatUsername() .. "! Friends in this server using Holex will see your messages.", Config.SuccessColor)
+        MarkHolexUserSeen(GetChatUsername(), "self")
+    else
+        addChatMsg("SYSTEM", "Log in to send messages.", Config.WarningColor)
+    end
+    while ChatContainer.Parent do
+        task.wait(2.5)
+        pcall(RenderNewMessages)
+        -- soft presence ping so friends list sees us
+        pcall(function()
+            if GetChatUsername() and getgenv().HolexRegisterPresence then getgenv().HolexRegisterPresence() end
+        end)
+    end
 end)
 
+getgenv().HolexChatSend = sendMsg
+getgenv().HolexChatRefresh = RenderNewMessages
+getgenv().HolexMarkSeen = MarkHolexUserSeen
 
 -- ==================== HOLEX FRIENDS TAB ====================
 local FriendsTab = MainWindow:CreateTab("Friends")
-local frSec = FriendsTab:CreateSection("Friend Requests")
+local frSec = FriendsTab:CreateSection("Holex Friends System")
 frSec:CreateParagraph({
-    Title = "Holex Friends System",
-    Content = "Send a request by Holex username.\nThey appear under Incoming Requests → Accept.\nAccepted friends show on this list + sidebar."
+    Title = "Holex Friends",
+    Content = "Only users running Holex Script Hub V14 can appear here.\nAdd friends by their Holex username. When they are online you can chat in Global Chat."
 })
 
 local addInput = frSec:CreateInput({
-    Title = "Holex Username",
-    Placeholder = "Enter their Holex login name"
+    Title = "Add Friend (Holex Username)",
+    Placeholder = "Enter their Holex username..."
 })
 
 frSec:CreateButton({
-    Title = "📩 Send Friend Request",
-    Description = "Sends a request (they must Accept)",
+    Title = "➕ Add Holex Friend",
+    Description = "Add a user who also uses Holex V14",
     Callback = function()
-        local name = (addInput.Text or ""):match("^%s*(.-)%s*$")
-        if name == "" then
-            HolexLib:Notify("Friends", "Enter a username", 3, Config.WarningColor)
-            return
-        end
-        local fn = getgenv().HolexSendFriendRequest or getgenv().HolexAddFriend
-        if not fn then
-            HolexLib:Notify("Friends", "Friends system not ready", 4, Config.WarningColor)
-            return
-        end
-        local ok, msg = fn(name)
-        if ok then
-            HolexLib:Notify("Friends", tostring(msg), 4, Config.SuccessColor)
-            addInput.Text = ""
-            if getgenv().HolexRefreshFriendsTab then getgenv().HolexRefreshFriendsTab() end
-            if getgenv().HolexRefreshFriends then getgenv().HolexRefreshFriends() end
+        local name = addInput.Text
+        if getgenv().HolexAddFriend then
+            local ok, msg = getgenv().HolexAddFriend(name)
+            if ok then
+                HolexLib:Notify("Friends", msg, 4, Config.SuccessColor)
+                if getgenv().HolexRefreshFriends then getgenv().HolexRefreshFriends() end
+            else
+                HolexLib:Notify("Friends", tostring(msg), 4, Config.WarningColor)
+            end
         else
-            HolexLib:Notify("Friends", tostring(msg), 4, Config.WarningColor)
+            HolexLib:Notify("Friends", "Friends system not ready yet. Wait a moment.", 4)
         end
+        addInput.Text = ""
     end
 })
 
 frSec:CreateButton({
-    Title = "⚡ Force Add (skip request)",
-    Description = "Instantly add to your friends list",
+    Title = "🔄 Refresh Online Friends",
+    Description = "Update the sidebar friends list",
     Callback = function()
-        local name = (addInput.Text or ""):match("^%s*(.-)%s*$")
-        if name == "" then return end
-        local fn = getgenv().HolexForceAddFriend
-        if fn then
-            local ok, msg = fn(name)
-            HolexLib:Notify("Friends", tostring(msg), 4, ok and Config.SuccessColor or Config.WarningColor)
-            if ok then
-                addInput.Text = ""
-                if getgenv().HolexRefreshFriendsTab then getgenv().HolexRefreshFriendsTab() end
-                if getgenv().HolexRefreshFriends then getgenv().HolexRefreshFriends() end
+        if getgenv().HolexRefreshFriends then
+            getgenv().HolexRefreshFriends()
+            HolexLib:Notify("Friends", "Refreshed!", 3, Config.SuccessColor)
+        end
+    end
+})
+
+local listSec = FriendsTab:CreateSection("Your Holex Friends")
+local function refreshFriendsTabList()
+    for _, child in ipairs(listSec.Content:GetChildren()) do
+        if child:IsA("Frame") or child:IsA("TextLabel") or child:IsA("TextButton") then
+            if not child:IsA("UIListLayout") and not child:IsA("UIPadding") then
+                child:Destroy()
             end
         end
     end
-})
-
-frSec:CreateButton({
-    Title = "🔄 Refresh Requests & List",
-    Callback = function()
-        if getgenv().HolexSyncRequests then getgenv().HolexSyncRequests() end
-        if getgenv().HolexRefreshFriendsTab then getgenv().HolexRefreshFriendsTab() end
-        if getgenv().HolexRefreshFriends then getgenv().HolexRefreshFriends() end
-        HolexLib:Notify("Friends", "Refreshed", 2, Config.SuccessColor)
-    end
-})
-
-local reqSec = FriendsTab:CreateSection("Incoming Requests")
-local outSec = FriendsTab:CreateSection("Outgoing Requests")
-local listSec = FriendsTab:CreateSection("Your Friends List")
-
-local function refreshFriendsTabList()
-    -- clear dynamic children by recreating paragraphs via destroy frames/labels
-    local function clearSec(sec)
-        pcall(function()
-            for _, child in ipairs(sec.Content:GetChildren()) do
-                if child:IsA("Frame") or child:IsA("TextLabel") or child:IsA("TextButton") then
-                    -- keep layout objects
-                    if not child:IsA("UIListLayout") and not child:IsA("UIPadding") then
-                        child:Destroy()
-                    end
+    local friends = UserData.HolexFriends or {}
+    local onlineMap = (getgenv().HolexGetOnline and getgenv().HolexGetOnline()) or {}
+    local seen = getgenv().HolexSeenUsers or {}
+    local count = 0
+    for uname, fdata in pairs(friends) do
+        count = count + 1
+        local isOnline = false
+        local detail = "Not running Holex right now"
+        local now = os.time()
+        for _, p in pairs(onlineMap) do
+            if type(p) == "table" and p.username and p.username:lower() == uname:lower() then
+                if now - (p.lastSeen or 0) <= 120 then
+                    isOnline = true
+                    detail = "Using Holex Script Hub V14"
                 end
             end
-        end)
-    end
-    clearSec(reqSec)
-    clearSec(outSec)
-    clearSec(listSec)
-
-    if getgenv().HolexSyncRequests then pcall(getgenv().HolexSyncRequests) end
-
-    UserData.FriendRequests = UserData.FriendRequests or { Incoming = {}, Outgoing = {} }
-    local incoming = UserData.FriendRequests.Incoming or {}
-    local outgoing = UserData.FriendRequests.Outgoing or {}
-    local friends = UserData.HolexFriends or {}
-    local online = (getgenv().HolexGetOnline and getgenv().HolexGetOnline()) or {}
-
-    local incN = 0
-    for fromName, req in pairs(incoming) do
-        incN = incN + 1
-        local uname = fromName
-        reqSec:CreateParagraph({
-            Title = "📩 " .. tostring(uname),
-            Content = "Sent: " .. os.date("%Y-%m-%d %H:%M", (req and req.at) or os.time())
-        })
-        reqSec:CreateButton({
-            Title = "✅ Accept " .. tostring(uname),
-            Callback = function()
-                local ok, msg = getgenv().HolexAcceptFriend(uname)
-                HolexLib:Notify("Friends", tostring(msg), 4, ok and Config.SuccessColor or Config.WarningColor)
-                refreshFriendsTabList()
-                if getgenv().HolexRefreshFriends then getgenv().HolexRefreshFriends() end
-            end
-        })
-        reqSec:CreateButton({
-            Title = "❌ Decline " .. tostring(uname),
-            Callback = function()
-                getgenv().HolexDeclineFriend(uname)
-                HolexLib:Notify("Friends", "Declined " .. tostring(uname), 3)
-                refreshFriendsTabList()
-                if getgenv().HolexRefreshFriends then getgenv().HolexRefreshFriends() end
-            end
-        })
-    end
-    if incN == 0 then
-        reqSec:CreateParagraph({ Title = "No incoming requests", Content = "When someone sends you a request it shows here." })
-    end
-
-    local outN = 0
-    for toName, req in pairs(outgoing) do
-        outN = outN + 1
-        outSec:CreateParagraph({
-            Title = "⏳ Pending → " .. tostring(toName),
-            Content = "Sent: " .. os.date("%Y-%m-%d %H:%M", (req and req.at) or os.time())
-        })
-        outSec:CreateButton({
-            Title = "Cancel request to " .. tostring(toName),
-            Callback = function()
-                if getgenv().HolexCancelRequest then getgenv().HolexCancelRequest(toName) end
-                refreshFriendsTabList()
-            end
-        })
-    end
-    if outN == 0 then
-        outSec:CreateParagraph({ Title = "No outgoing requests", Content = "Send a request using the box above." })
-    end
-
-    local fN = 0
-    for uname, fdata in pairs(friends) do
-        fN = fN + 1
-        local isOnline = false
-        for _, p in pairs(online) do
-            if type(p) == "table" and p.username and p.username:lower() == uname:lower() then
-                isOnline = true
-                break
-            end
         end
-        local status = isOnline and "🟢 ONLINE" or "⚫ Offline"
+        local s = seen[uname:lower()]
+        if s and now - (s.at or 0) <= 180 then
+            isOnline = true
+            detail = "Using Holex Script Hub V14 (" .. tostring(s.source or "live") .. ")"
+        end
+        local status = isOnline and "🟢 ONLINE · Holex V14" or "⚫ Offline"
         listSec:CreateParagraph({
-            Title = tostring(uname) .. "  " .. status,
-            Content = "Friends since " .. os.date("%Y-%m-%d", fdata.addedAt or os.time()) .. " · status: accepted"
-        })
-        listSec:CreateButton({
-            Title = "🗑️ Remove " .. tostring(uname),
-            Callback = function()
-                if getgenv().HolexRemoveFriend then getgenv().HolexRemoveFriend(uname) end
-                HolexLib:Notify("Friends", "Removed " .. tostring(uname), 3, Config.SuccessColor)
-                refreshFriendsTabList()
-                if getgenv().HolexRefreshFriends then getgenv().HolexRefreshFriends() end
-            end
+            Title = uname .. "  " .. status,
+            Content = detail .. "\nAdded: " .. os.date("%Y-%m-%d", fdata.addedAt or os.time())
         })
     end
-    if fN == 0 then
+    if count == 0 then
         listSec:CreateParagraph({
             Title = "No friends yet",
-            Content = "Send a request or Force Add. Accepted friends appear here and on the sidebar."
-        })
-    else
-        listSec:CreateParagraph({
-            Title = fN .. " friend(s)",
-            Content = "Sidebar shows the same list with online status."
+            Content = "Add Holex users above. Green = online and using Holex V14."
         })
     end
 end
-
-getgenv().HolexRefreshFriendsTab = refreshFriendsTabList
-task.defer(function()
-    task.wait(0.5)
-    pcall(refreshFriendsTabList)
-end)
+refreshFriendsTabList()
 
 frSec:CreateButton({
-    Title = "Remove Friend (type name above)",
+    Title = "Remove Friend",
+    Description = "Type username in the input above then click",
     Callback = function()
-        local name = (addInput.Text or ""):match("^%s*(.-)%s*$")
-        if name ~= "" and getgenv().HolexRemoveFriend then
+        local name = addInput.Text
+        if getgenv().HolexRemoveFriend and name ~= "" then
             if getgenv().HolexRemoveFriend(name) then
                 HolexLib:Notify("Friends", "Removed " .. name, 3, Config.SuccessColor)
                 refreshFriendsTabList()
@@ -7101,6 +7215,7 @@ frSec:CreateButton({
         addInput.Text = ""
     end
 })
+
 
 
 -- ==================== VOICE CALL TAB ====================
@@ -10230,30 +10345,40 @@ local function ShowMainUI()
     -- Register ourselves as online Holex user
     local function RegisterHolexPresence()
         pcall(function()
+            if HolexEnsureDir then HolexEnsureDir(HOLEX_PRESENCE_FILE) end
+            local uname = UserData.Username or Player.Name
             local presence = {
-                username = UserData.Username or Player.Name,
+                username = uname,
                 display = Player.DisplayName,
                 userid = Player.UserId,
                 lastSeen = os.time(),
                 version = HOLEX_VERSION,
-                city = NetworkInfo.City or "Unknown",
-                country = NetworkInfo.Country or "Unknown"
+                hub = "HolexScriptHubV14",
+                city = (NetworkInfo and NetworkInfo.City) or "Unknown",
+                country = (NetworkInfo and NetworkInfo.Country) or "Unknown",
+                placeId = game.PlaceId,
+                jobId = game.JobId
             }
-            -- Local online list (shared via file for same-machine / same-executor sessions)
             local online = {}
-            if isfile(HOLEX_PRESENCE_FILE) then
-                online = HttpService:JSONDecode(readfile(HOLEX_PRESENCE_FILE)) or {}
+            if isfile and isfile(HOLEX_PRESENCE_FILE) then
+                pcall(function() online = HttpService:JSONDecode(readfile(HOLEX_PRESENCE_FILE)) or {} end)
             end
             online[tostring(Player.UserId)] = presence
-            -- Prune stale (older than 5 minutes)
+            -- also index by username for easier lookup
+            online["user:" .. tostring(uname):lower()] = presence
             local now = os.time()
             for uid, p in pairs(online) do
-                if now - (p.lastSeen or 0) > 300 then
-                    online[uid] = nil
+                if type(p) == "table" and now - (p.lastSeen or 0) > 120 then
+                    online[uid] = nil -- 2 min = offline
                 end
             end
             writefile(HOLEX_PRESENCE_FILE, HttpService:JSONEncode(online))
             UserData.HolexOnlineUsers = online
+            if getgenv().HolexMarkSeen then getgenv().HolexMarkSeen(uname, "presence") end
+            getgenv().HolexSeenUsers = getgenv().HolexSeenUsers or {}
+            getgenv().HolexSeenUsers[tostring(uname):lower()] = {
+                username = uname, at = os.time(), source = "presence", version = HOLEX_VERSION
+            }
         end)
     end
 
@@ -10267,222 +10392,21 @@ local function ShowMainUI()
         return online
     end
 
-
-    local HOLEX_REQUESTS_FILE = HOLEX_DATA .. "/holex_friend_requests.json"
-
-    local function LoadFriendRequests()
-        UserData.FriendRequests = UserData.FriendRequests or { Incoming = {}, Outgoing = {} }
-        pcall(function()
-            if isfile and isfile(HOLEX_REQUESTS_FILE) then
-                local data = HttpService:JSONDecode(readfile(HOLEX_REQUESTS_FILE))
-                if type(data) == "table" then
-                    -- global request board: { [toUsername_lower] = { {from=, to=, at=, id=} } }
-                    UserData._GlobalRequestBoard = data
-                end
-            end
-        end)
-        UserData._GlobalRequestBoard = UserData._GlobalRequestBoard or {}
-    end
-
-    local function SaveFriendRequestsBoard()
-        pcall(function()
-            if HolexEnsureDir then HolexEnsureDir(HOLEX_REQUESTS_FILE) end
-            writefile(HOLEX_REQUESTS_FILE, HttpService:JSONEncode(UserData._GlobalRequestBoard or {}))
-        end)
-    end
-
-    LoadFriendRequests()
-
-    local function MyUsername()
-        return tostring(UserData.Username or Player.Name or "")
-    end
-
-    local function SyncIncomingRequests()
-        -- Pull requests addressed to me from the shared board
-        UserData.FriendRequests = UserData.FriendRequests or { Incoming = {}, Outgoing = {} }
-        UserData.FriendRequests.Incoming = UserData.FriendRequests.Incoming or {}
-        local me = MyUsername():lower()
-        local board = UserData._GlobalRequestBoard or {}
-        local list = board[me] or {}
-        for _, req in ipairs(list) do
-            local from = tostring(req.from or "")
-            if from ~= "" and not UserData.FriendRequests.Incoming[from] then
-                -- don't show if already friends
-                local already = false
-                for uname, _ in pairs(UserData.HolexFriends or {}) do
-                    if uname:lower() == from:lower() then already = true break end
-                end
-                if not already then
-                    UserData.FriendRequests.Incoming[from] = {
-                        username = from,
-                        display = req.display or from,
-                        from = from,
-                        at = req.at or os.time(),
-                        id = req.id or (from .. "_" .. tostring(req.at or os.time()))
-                    }
-                end
-            end
-        end
-    end
-
-    local function SendFriendRequest(targetUsername)
-        if not targetUsername or targetUsername == "" then return false, "Empty username" end
-        targetUsername = tostring(targetUsername):match("^%s*(.-)%s*$")
-        local me = MyUsername()
-        if targetUsername:lower() == me:lower() then return false, "Cannot add yourself" end
-        UserData.HolexFriends = UserData.HolexFriends or {}
-        for uname, _ in pairs(UserData.HolexFriends) do
-            if uname:lower() == targetUsername:lower() then
-                return false, "Already friends with " .. uname
-            end
-        end
-        UserData.FriendRequests = UserData.FriendRequests or { Incoming = {}, Outgoing = {} }
-        UserData.FriendRequests.Outgoing = UserData.FriendRequests.Outgoing or {}
-        if UserData.FriendRequests.Outgoing[targetUsername] then
-            return false, "Request already sent"
-        end
-
-        local req = {
-            from = me,
-            display = Player.DisplayName or me,
-            to = targetUsername,
-            at = os.time(),
-            id = me:lower() .. "_" .. targetUsername:lower() .. "_" .. tostring(os.time())
-        }
-        UserData.FriendRequests.Outgoing[targetUsername] = req
-
-        -- Write to shared board so the other Holex user (same PC / shared HolexData) can see it
-        UserData._GlobalRequestBoard = UserData._GlobalRequestBoard or {}
-        local key = targetUsername:lower()
-        UserData._GlobalRequestBoard[key] = UserData._GlobalRequestBoard[key] or {}
-        table.insert(UserData._GlobalRequestBoard[key], req)
-        SaveFriendRequestsBoard()
-        SaveUserData()
-        HolexLogger:Success("FRIENDS", "Friend request sent to " .. targetUsername)
-        return true, "Request sent to " .. targetUsername
-    end
-
-    local function AcceptFriendRequest(fromUsername)
-        if not fromUsername or fromUsername == "" then return false, "Empty" end
-        fromUsername = tostring(fromUsername)
-        UserData.FriendRequests = UserData.FriendRequests or { Incoming = {}, Outgoing = {} }
-        local incoming = UserData.FriendRequests.Incoming or {}
-        local req = incoming[fromUsername]
-        -- try case-insensitive
-        if not req then
-            for k, v in pairs(incoming) do
-                if k:lower() == fromUsername:lower() then req = v fromUsername = k break end
-            end
-        end
-        if not req then
-            -- accept outgoing mirrored or force-add
-            req = { from = fromUsername, display = fromUsername, at = os.time() }
-        end
-
-        UserData.HolexFriends = UserData.HolexFriends or {}
-        UserData.HolexFriends[fromUsername] = {
-            username = fromUsername,
-            display = req.display or fromUsername,
-            addedAt = os.time(),
-            status = "accepted",
-            online = false
-        }
-        -- clear incoming
-        if UserData.FriendRequests.Incoming then
-            UserData.FriendRequests.Incoming[fromUsername] = nil
-        end
-        -- clear from board
-        local me = MyUsername():lower()
-        local board = UserData._GlobalRequestBoard or {}
-        if board[me] then
-            local kept = {}
-            for _, r in ipairs(board[me]) do
-                if tostring(r.from or ""):lower() ~= fromUsername:lower() then
-                    table.insert(kept, r)
-                end
-            end
-            board[me] = kept
-            UserData._GlobalRequestBoard = board
-            SaveFriendRequestsBoard()
-        end
-        SaveHolexFriends()
-        SaveUserData()
-        HolexLogger:Success("FRIENDS", "Accepted friend: " .. fromUsername)
-        return true, "You are now friends with " .. fromUsername
-    end
-
-    local function DeclineFriendRequest(fromUsername)
-        if not fromUsername then return false end
-        UserData.FriendRequests = UserData.FriendRequests or { Incoming = {}, Outgoing = {} }
-        if UserData.FriendRequests.Incoming then
-            UserData.FriendRequests.Incoming[fromUsername] = nil
-            for k, _ in pairs(UserData.FriendRequests.Incoming) do
-                if k:lower() == fromUsername:lower() then
-                    UserData.FriendRequests.Incoming[k] = nil
-                end
-            end
-        end
-        local me = MyUsername():lower()
-        local board = UserData._GlobalRequestBoard or {}
-        if board[me] then
-            local kept = {}
-            for _, r in ipairs(board[me]) do
-                if tostring(r.from or ""):lower() ~= fromUsername:lower() then
-                    table.insert(kept, r)
-                end
-            end
-            board[me] = kept
-            SaveFriendRequestsBoard()
-        end
-        SaveUserData()
-        return true, "Declined " .. fromUsername
-    end
-
-    local function CancelOutgoingRequest(targetUsername)
-        UserData.FriendRequests = UserData.FriendRequests or { Incoming = {}, Outgoing = {} }
-        if UserData.FriendRequests.Outgoing then
-            UserData.FriendRequests.Outgoing[targetUsername] = nil
-        end
-        local key = tostring(targetUsername):lower()
-        local board = UserData._GlobalRequestBoard or {}
-        if board[key] then
-            local me = MyUsername():lower()
-            local kept = {}
-            for _, r in ipairs(board[key]) do
-                if tostring(r.from or ""):lower() ~= me then
-                    table.insert(kept, r)
-                end
-            end
-            board[key] = kept
-            SaveFriendRequestsBoard()
-        end
-        SaveUserData()
-        return true
-    end
-
-    -- Instant add still available, but primary path is request
     local function AddHolexFriend(targetUsername)
-        -- Prefer request system
-        return SendFriendRequest(targetUsername)
-    end
-
-    local function ForceAddFriend(targetUsername)
         if not targetUsername or targetUsername == "" then return false, "Empty username" end
         targetUsername = targetUsername:match("^%s*(.-)%s*$")
-        if targetUsername:lower() == MyUsername():lower() then return false, "Cannot add yourself" end
+        if targetUsername == UserData.Username then return false, "Cannot add yourself" end
         UserData.HolexFriends = UserData.HolexFriends or {}
         if UserData.HolexFriends[targetUsername] then return false, "Already friends" end
         UserData.HolexFriends[targetUsername] = {
             username = targetUsername,
-            display = targetUsername,
             addedAt = os.time(),
-            status = "accepted"
+            display = targetUsername
         }
-        -- clear any pending either way
-        pcall(function() CancelOutgoingRequest(targetUsername) end)
         SaveHolexFriends()
         SaveUserData()
-        return true, "Added " .. targetUsername .. " to friends list"
+        HolexLogger:Success("FRIENDS", "Added Holex friend: " .. targetUsername)
+        return true, "Added " .. targetUsername
     end
 
     local function RemoveHolexFriend(targetUsername)
@@ -10492,128 +10416,119 @@ local function ShowMainUI()
             SaveUserData()
             return true
         end
-        -- case insensitive
-        for k, _ in pairs(UserData.HolexFriends or {}) do
-            if k:lower() == tostring(targetUsername):lower() then
-                UserData.HolexFriends[k] = nil
-                SaveHolexFriends()
-                SaveUserData()
-                return true
-            end
-        end
         return false
     end
 
-    local function refreshFriendsList()
-        pcall(LoadFriendRequests)
-        pcall(SyncIncomingRequests)
+    local function IsHolexOnline(uname)
+        uname = tostring(uname or ""):lower()
+        if uname == "" then return false, nil end
+        local now = os.time()
+        -- 1) Presence file (same PC / shared HolexData)
+        local online = GetOnlineHolexUsers() or {}
+        for _, p in pairs(online) do
+            if type(p) == "table" and p.username and p.username:lower() == uname then
+                if now - (p.lastSeen or 0) <= 120 then
+                    return true, p
+                end
+            end
+        end
+        -- 2) Seen via Holex chat / presence this session
+        local seen = getgenv().HolexSeenUsers or {}
+        local s = seen[uname]
+        if s and now - (s.at or 0) <= 180 then
+            return true, s
+        end
+        -- 3) Same Roblox server: match friend username to a player, and they used Holex recently
+        for _, plr in ipairs(Players:GetPlayers()) do
+            if plr.Name:lower() == uname or (plr.DisplayName and plr.DisplayName:lower() == uname) then
+                if s and now - (s.at or 0) <= 300 then
+                    return true, { username = plr.Name, display = plr.DisplayName, source = "server" }
+                end
+                -- In server but not confirmed Holex yet
+                return false, { username = plr.Name, display = plr.DisplayName, source = "server_only" }
+            end
+        end
+        return false, nil
+    end
 
+    local function refreshFriendsList()
         for _, child in ipairs(FriendsScroll:GetChildren()) do
-            if child:IsA("Frame") or (child:IsA("TextLabel") and child.Name ~= "UIPadding") then
-                if not child:IsA("UIListLayout") and not child:IsA("UIPadding") then
+            if child:IsA("Frame") or (child:IsA("TextLabel") and not child:IsA("UIListLayout")) then
+                if child.ClassName ~= "UIListLayout" and child.ClassName ~= "UIPadding" then
                     child:Destroy()
                 end
             end
         end
 
-        local online = GetOnlineHolexUsers()
         local friends = UserData.HolexFriends or {}
         local count = 0
+        local onlineCount = 0
 
-        local function makeHeader(txt)
-            local header = Instance.new("TextLabel")
-            header.Name = "FriendHeader"
-            header.Size = UDim2.new(1, 0, 0, 18)
-            header.BackgroundTransparency = 1
-            header.Font = Enum.Font.GothamBold
-            header.TextSize = 10
-            header.TextColor3 = Config.AccentColor
-            header.TextXAlignment = Enum.TextXAlignment.Left
-            header.Text = "  " .. txt
-            header.Parent = FriendsScroll
-        end
-
-        makeHeader("FRIENDS")
+        local header = Instance.new("TextLabel")
+        header.Size = UDim2.new(1, 0, 0, 18)
+        header.BackgroundTransparency = 1
+        header.Font = Enum.Font.GothamBold
+        header.TextSize = 10
+        header.TextColor3 = Config.AccentColor
+        header.TextXAlignment = Enum.TextXAlignment.Left
+        header.Text = "  HOLEX FRIENDS"
+        header.Parent = FriendsScroll
 
         for uname, fdata in pairs(friends) do
-            local isOnline = false
-            local presence = nil
-            for uid, p in pairs(online) do
-                if type(p) == "table" and p.username and p.username:lower() == uname:lower() then
-                    isOnline = true
-                    presence = p
-                    break
-                end
-            end
+            local isOnline, presence = IsHolexOnline(uname)
+            if isOnline then onlineCount = onlineCount + 1 end
+
             local friendRow = Instance.new("Frame")
-            friendRow.Name = "FriendRow"
-            friendRow.Size = UDim2.new(1, -4, 0, 28)
-            friendRow.BackgroundColor3 = isOnline and Color3.fromRGB(20, 40, 30) or Config.QuaternaryColor
+            friendRow.Size = UDim2.new(1, -4, 0, 32)
+            friendRow.BackgroundColor3 = isOnline and Color3.fromRGB(18, 42, 28) or Config.QuaternaryColor
             friendRow.BorderSizePixel = 0
             friendRow.Parent = FriendsScroll
             Instance.new("UICorner", friendRow).CornerRadius = UDim.new(0, 6)
 
+            -- Green icon = online using Holex V14
             local dot = Instance.new("TextLabel")
-            dot.Size = UDim2.new(0, 16, 1, 0)
+            dot.Size = UDim2.new(0, 18, 1, 0)
             dot.Position = UDim2.new(0, 4, 0, 0)
             dot.BackgroundTransparency = 1
             dot.Text = isOnline and "●" or "○"
-            dot.TextColor3 = isOnline and Color3.fromRGB(80, 220, 120) or Config.DimTextColor
+            dot.TextColor3 = isOnline and Color3.fromRGB(50, 220, 100) or Color3.fromRGB(90, 90, 100)
             dot.Font = Enum.Font.GothamBold
-            dot.TextSize = 12
+            dot.TextSize = 14
             dot.Parent = friendRow
 
-            local nameLbl = Instance.new("TextLabel")
-            nameLbl.Size = UDim2.new(1, -50, 1, 0)
-            nameLbl.Position = UDim2.new(0, 20, 0, 0)
-            nameLbl.BackgroundTransparency = 1
-            nameLbl.Font = Enum.Font.Gotham
-            nameLbl.TextSize = 11
-            nameLbl.TextColor3 = Config.TextColor
-            nameLbl.TextXAlignment = Enum.TextXAlignment.Left
-            nameLbl.Text = tostring(fdata.display or uname)
-            nameLbl.Parent = friendRow
+            local fName = Instance.new("TextLabel")
+            fName.Size = UDim2.new(1, -70, 0, 16)
+            fName.Position = UDim2.new(0, 22, 0, 2)
+            fName.BackgroundTransparency = 1
+            fName.Font = Enum.Font.Gotham
+            fName.TextSize = 11
+            fName.TextColor3 = Config.TextColor
+            fName.TextXAlignment = Enum.TextXAlignment.Left
+            fName.Text = tostring((presence and presence.display) or fdata.display or uname)
+            fName.Parent = friendRow
 
-            local st = Instance.new("TextLabel")
-            st.Size = UDim2.new(0, 40, 1, 0)
-            st.Position = UDim2.new(1, -42, 0, 0)
-            st.BackgroundTransparency = 1
-            st.Font = Enum.Font.Gotham
-            st.TextSize = 9
-            st.TextColor3 = isOnline and Color3.fromRGB(80, 220, 120) or Config.DimTextColor
-            st.Text = isOnline and "ON" or "OFF"
-            st.Parent = friendRow
+            local sub = Instance.new("TextLabel")
+            sub.Size = UDim2.new(1, -70, 0, 12)
+            sub.Position = UDim2.new(0, 22, 0, 16)
+            sub.BackgroundTransparency = 1
+            sub.Font = Enum.Font.Gotham
+            sub.TextSize = 9
+            sub.TextXAlignment = Enum.TextXAlignment.Left
+            if isOnline then
+                sub.Text = "🟢 Online · Holex V14"
+                sub.TextColor3 = Color3.fromRGB(80, 220, 120)
+            else
+                sub.Text = "Offline"
+                sub.TextColor3 = Config.DimTextColor
+            end
+            sub.Parent = friendRow
 
             count = count + 1
         end
 
-        -- Pending incoming on sidebar
-        local incoming = (UserData.FriendRequests and UserData.FriendRequests.Incoming) or {}
-        local incCount = 0
-        for _ in pairs(incoming) do incCount = incCount + 1 end
-        if incCount > 0 then
-            makeHeader("REQUESTS (" .. incCount .. ")")
-            for fromName, req in pairs(incoming) do
-                local row = Instance.new("Frame")
-                row.Size = UDim2.new(1, -4, 0, 24)
-                row.BackgroundColor3 = Color3.fromRGB(50, 40, 20)
-                row.BorderSizePixel = 0
-                row.Parent = FriendsScroll
-                Instance.new("UICorner", row).CornerRadius = UDim.new(0, 6)
-                local lbl = Instance.new("TextLabel")
-                lbl.Size = UDim2.new(1, -8, 1, 0)
-                lbl.Position = UDim2.new(0, 6, 0, 0)
-                lbl.BackgroundTransparency = 1
-                lbl.Font = Enum.Font.Gotham
-                lbl.TextSize = 10
-                lbl.TextColor3 = Config.WarningColor
-                lbl.TextXAlignment = Enum.TextXAlignment.Left
-                lbl.Text = "📩 " .. tostring(fromName)
-                lbl.Parent = row
-            end
-        end
+        header.Text = "  FRIENDS (" .. onlineCount .. " online / " .. count .. ")"
 
-        if count == 0 and incCount == 0 then
+        if count == 0 then
             local empty = Instance.new("TextLabel")
             empty.Size = UDim2.new(1, 0, 0, 40)
             empty.BackgroundTransparency = 1
@@ -10621,7 +10536,7 @@ local function ShowMainUI()
             empty.TextSize = 10
             empty.TextColor3 = Config.DimTextColor
             empty.TextWrapped = true
-            empty.Text = "No friends yet.\nSend requests in Friends tab!"
+            empty.Text = "No friends yet.\nAdd them in the Friends tab!"
             empty.Parent = FriendsScroll
         end
 
@@ -10635,33 +10550,25 @@ local function ShowMainUI()
         while true do
             if UserData.LoggedIn then
                 pcall(RegisterHolexPresence)
-                pcall(function()
-                    LoadFriendRequests()
-                    SyncIncomingRequests()
-                end)
             end
-            task.wait(20)
+            task.wait(8)
         end
     end)
 
     task.spawn(function()
         while FriendsWidget.Parent do
             pcall(refreshFriendsList)
-            task.wait(12)
+            task.wait(5)
         end
     end)
 
     -- Expose helpers globally for the Friends tab
     getgenv().HolexAddFriend = AddHolexFriend
-    getgenv().HolexSendFriendRequest = SendFriendRequest
-    getgenv().HolexAcceptFriend = AcceptFriendRequest
-    getgenv().HolexDeclineFriend = DeclineFriendRequest
-    getgenv().HolexCancelRequest = CancelOutgoingRequest
-    getgenv().HolexForceAddFriend = ForceAddFriend
     getgenv().HolexRemoveFriend = RemoveHolexFriend
     getgenv().HolexRefreshFriends = refreshFriendsList
     getgenv().HolexGetOnline = GetOnlineHolexUsers
-    getgenv().HolexSyncRequests = SyncIncomingRequests
+    getgenv().HolexRegisterPresence = RegisterHolexPresence
+    getgenv().HolexIsOnline = IsHolexOnline
 
     local MusicWidget = Utilities:Create("Frame", {
         BackgroundColor3 = Config.TertiaryColor,
