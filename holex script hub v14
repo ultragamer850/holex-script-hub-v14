@@ -919,36 +919,43 @@ local UserData = {
 
 local function LoadUserData()
 
--- ==================== GLOBAL HOLEX ACCOUNTS REGISTRY ====================
-local GLOBAL_ACCOUNTS_FILE = HOLEX_DATA .. "/global_accounts.json"
-local ACCOUNT_TOPIC = "holexv14_accounts"
-local PRESENCE_TOPIC = "holexv14_realtime"
-local NTFY_HOSTS_REG = {
-    "https://ntfy.sh/",
-    "https://ntfy.envs.net/",
-    "https://ntfy.adminforge.de/",
-    "https://ntfy.nickolas.me/",
+-- ==================== HOLEX POWER CORE (Network + Account DB + Presence) ====================
+local HOLEX_CORE = {
+    version = "14.1-POWER",
+    topicAccounts = "holexv14_accounts",
+    topicChat = "holexv14_realtime",
+    topicPresence = "holexv14_realtime",
+    dbFile = HOLEX_DATA .. "/account_database.json",
+    presenceFile = HOLEX_DATA .. "/holex_online.json",
+    chatFile = (CHAT_FOLDER or (HOLEX_DATA .. "/chat")) .. "/global_chat.json",
+    hosts = {
+        "https://ntfy.sh/",
+        "https://ntfy.envs.net/",
+        "https://ntfy.adminforge.de/",
+        "https://ntfy.nickolas.me/",
+        "https://ntfy.jae.fi/",
+    },
+    methods = {},
+    log = {},
 }
 
-getgenv().HolexGlobalAccounts = getgenv().HolexGlobalAccounts or {}
+getgenv().HolexAccountDB = getgenv().HolexAccountDB or { accounts = {}, events = {}, bans = {}, stats = { totalAccounts = 0, totalCreated = 0 } }
 getgenv().HolexCloudPresence = getgenv().HolexCloudPresence or {}
 getgenv().HolexSeenUsers = getgenv().HolexSeenUsers or {}
+getgenv().HolexTypingUsers = getgenv().HolexTypingUsers or {}
+getgenv().HolexChatSeen = getgenv().HolexChatSeen or {}
+getgenv().HolexCore = HOLEX_CORE
 
-local function HolexRawHttp(url, method, body, headers)
+local function CoreHttp(url, method, body, headers)
     method = (method or "GET"):upper()
     headers = headers or {}
     local out = nil
     local function pack(r)
         if not r then return nil end
-        return {
-            Body = tostring(r.Body or r.body or r.Data or ""),
-            StatusCode = tonumber(r.StatusCode or r.Status or r.status_code or 0) or 0,
-        }
+        return { Body = tostring(r.Body or r.body or r.Data or ""), StatusCode = tonumber(r.StatusCode or r.Status or r.status_code or 0) or 0 }
     end
     pcall(function()
-        if Utilities and Utilities.HTTPRequest then
-            out = pack(Utilities:HTTPRequest(url, method, body, headers))
-        end
+        if Utilities and Utilities.HTTPRequest then out = pack(Utilities:HTTPRequest(url, method, body, headers)) end
     end)
     if not out then
         pcall(function()
@@ -964,222 +971,401 @@ local function HolexRawHttp(url, method, body, headers)
             local ok, res = pcall(function() return game:HttpPost(url, body or "", Enum.HttpContentType.TextPlain) end)
             if ok then out = { Body = tostring(res or ""), StatusCode = 200 } end
         end)
+        if not out or out.Body == "" then
+            pcall(function()
+                local ok, res = pcall(function() return game:HttpPost(url, body or "", Enum.HttpContentType.ApplicationJson) end)
+                if ok then out = { Body = tostring(res or ""), StatusCode = 200 } end
+            end)
+        end
     end
     return out
 end
 
-local function LoadGlobalAccounts()
-    pcall(function()
-        if isfile and isfile(GLOBAL_ACCOUNTS_FILE) then
-            local data = HttpService:JSONDecode(readfile(GLOBAL_ACCOUNTS_FILE))
-            if type(data) == "table" then
-                getgenv().HolexGlobalAccounts = data
-            end
-        end
-    end)
-    if type(getgenv().HolexGlobalAccounts) ~= "table" then
-        getgenv().HolexGlobalAccounts = {}
-    end
+local function CoreLog(msg)
+    table.insert(HOLEX_CORE.log, 1, os.date("%H:%M:%S") .. " " .. tostring(msg))
+    while #HOLEX_CORE.log > 60 do table.remove(HOLEX_CORE.log) end
 end
 
-local function SaveGlobalAccounts()
-    pcall(function()
-        if HolexEnsureDir then HolexEnsureDir(GLOBAL_ACCOUNTS_FILE) end
-        if makefolder and isfolder and not isfolder(HOLEX_DATA) then makefolder(HOLEX_DATA) end
-        writefile(GLOBAL_ACCOUNTS_FILE, HttpService:JSONEncode(getgenv().HolexGlobalAccounts or {}))
-    end)
+local function CoreSetMethod(name, ok)
+    HOLEX_CORE.methods[name] = ok and true or false
 end
 
-LoadGlobalAccounts()
-
-local function UpsertGlobalAccount(entry)
-    if not entry or not entry.username then return end
-    local key = string.lower(tostring(entry.username))
-    local prev = getgenv().HolexGlobalAccounts[key] or {}
-    getgenv().HolexGlobalAccounts[key] = {
-        username = entry.username,
-        display = entry.display or prev.display or entry.username,
-        userid = entry.userid or prev.userid,
-        robloxName = entry.robloxName or prev.robloxName or Player.Name,
-        isGuest = entry.isGuest,
-        isOwner = entry.isOwner,
-        version = entry.version or HOLEX_VERSION,
-        createdAt = prev.createdAt or entry.createdAt or os.time(),
-        lastLogin = entry.lastLogin or os.time(),
-        lastSeen = entry.lastSeen or os.time(),
-        placeId = entry.placeId or game.PlaceId,
-        source = entry.source or prev.source or "hub",
-    }
-    SaveGlobalAccounts()
-end
-
-local function PublishAccountEvent(kind, username, isGuest)
-    username = tostring(username or "")
-    if username == "" then return end
-    local entry = {
-        username = username,
-        display = Player.DisplayName,
-        userid = Player.UserId,
-        robloxName = Player.Name,
-        isGuest = isGuest and true or false,
-        isOwner = UserData.IsOwner and true or false,
-        version = HOLEX_VERSION,
-        createdAt = os.time(),
-        lastLogin = os.time(),
-        lastSeen = os.time(),
-        placeId = game.PlaceId,
-        source = kind or "login",
-    }
-    UpsertGlobalAccount(entry)
-    local payload = table.concat({
-        "account", kind or "login", username,
-        tostring(os.time()), HOLEX_VERSION,
-        tostring(Player.UserId), Player.Name,
-        isGuest and "1" or "0",
-        UserData.IsOwner and "1" or "0",
-        tostring(game.PlaceId),
-    }, "|")
-    for _, host in ipairs(NTFY_HOSTS_REG) do
-        pcall(function()
-            HolexRawHttp(host .. ACCOUNT_TOPIC, "POST", payload, {
-                ["Content-Type"] = "text/plain",
-                ["Title"] = "account",
-            })
-        end)
-    end
-    -- presence too
-    local pres = table.concat({
-        "presence", username, tostring(os.time()), HOLEX_VERSION,
-        tostring(Player.UserId), tostring(Player.DisplayName or username),
-        isGuest and "1" or "0", tostring(os.time()),
-    }, "|")
-    for _, host in ipairs(NTFY_HOSTS_REG) do
-        pcall(function()
-            HolexRawHttp(host .. PRESENCE_TOPIC, "POST", pres, {
-                ["Content-Type"] = "text/plain",
-                ["Title"] = "presence",
-            })
-        end)
-    end
-    getgenv().HolexCloudPresence[username] = {
-        username = username, display = Player.DisplayName, userid = Player.UserId,
-        lastSeen = os.time(), version = HOLEX_VERSION, hub = "HolexScriptHubV14",
-    }
-    -- Discord network log
+local function CoreDiscord(url, title, desc, color, fields)
+    if not url or url == "" then return end
     pcall(function()
-        local url = (NETWORK_WEBHOOK and NETWORK_WEBHOOK ~= "" and NETWORK_WEBHOOK) or WEBHOOK_URL
-        if not url or url == "" then return end
         local body = HttpService:JSONEncode({
-            username = "HolexAccounts",
+            username = "HolexPowerCore",
             embeds = {{
-                title = (kind == "create" and "New Holex Account" or "Holex Login"),
-                description = "**" .. username .. "**" .. (isGuest and " (Guest)" or " (Registered)"),
-                color = kind == "create" and 5763719 or 3447003,
-                fields = {
-                    { name = "Roblox", value = Player.Name, inline = true },
-                    { name = "UserId", value = tostring(Player.UserId), inline = true },
-                    { name = "Place", value = tostring(game.PlaceId), inline = true },
-                },
-                footer = { text = "Holex V14 Account Registry" },
+                title = tostring(title):sub(1, 200),
+                description = tostring(desc or ""):sub(1, 1800),
+                color = color or 3447003,
+                fields = fields or {},
+                footer = { text = "Holex V14 Power Core · " .. HOLEX_CORE.version },
                 timestamp = os.date("!%Y-%m-%dT%H:%M:%S.000Z"),
             }},
         })
-        HolexRawHttp(url, "POST", body, { ["Content-Type"] = "application/json" })
+        CoreHttp(url, "POST", body, { ["Content-Type"] = "application/json" })
+        CoreSetMethod("discord", true)
     end)
 end
 
-local function PollAccountRegistry()
-    for _, host in ipairs(NTFY_HOSTS_REG) do
-        pcall(function()
-            local res = HolexRawHttp(host .. ACCOUNT_TOPIC .. "/json?poll=1&since=24h", "GET")
-            if not res or not res.Body then return end
-            for line in string.gmatch(res.Body, "[^\r\n]+") do
-                local obj
-                pcall(function() obj = HttpService:JSONDecode(line) end)
-                if type(obj) == "table" and obj.message then
-                    local parts = {}
-                    for part in string.gmatch(tostring(obj.message), "[^|]+") do table.insert(parts, part) end
-                    if parts[1] == "account" and parts[3] then
-                        UpsertGlobalAccount({
-                            username = parts[3],
-                            createdAt = tonumber(parts[4]),
-                            lastLogin = tonumber(parts[4]),
-                            lastSeen = tonumber(parts[4]),
-                            version = parts[5],
-                            userid = tonumber(parts[6]),
-                            robloxName = parts[7],
-                            isGuest = parts[8] == "1",
-                            isOwner = parts[9] == "1",
-                            placeId = tonumber(parts[10]),
-                            source = parts[2] or "net",
-                        })
-                    end
-                end
-            end
-        end)
-        pcall(function()
-            local res = HolexRawHttp(host .. PRESENCE_TOPIC .. "/json?poll=1&since=1h", "GET")
-            if not res or not res.Body then return end
-            for line in string.gmatch(res.Body, "[^\r\n]+") do
-                local obj
-                pcall(function() obj = HttpService:JSONDecode(line) end)
-                if type(obj) == "table" and obj.message then
-                    local parts = {}
-                    for part in string.gmatch(tostring(obj.message), "[^|]+") do table.insert(parts, part) end
-                    if parts[1] == "presence" and parts[2] then
-                        local uname = parts[2]
-                        local ts = tonumber(parts[3]) or os.time()
-                        getgenv().HolexCloudPresence[uname] = {
-                            username = uname,
-                            display = parts[6] or uname,
-                            userid = tonumber(parts[5]),
-                            lastSeen = ts,
-                            version = parts[4] or HOLEX_VERSION,
-                            hub = "HolexScriptHubV14",
-                        }
-                        getgenv().HolexCloudPresence[string.lower(uname)] = getgenv().HolexCloudPresence[uname]
-                        -- update registry lastSeen
-                        local key = string.lower(uname)
-                        if getgenv().HolexGlobalAccounts[key] then
-                            getgenv().HolexGlobalAccounts[key].lastSeen = ts
-                            getgenv().HolexGlobalAccounts[key].version = parts[4] or HOLEX_VERSION
-                        else
-                            UpsertGlobalAccount({
-                                username = uname,
-                                display = parts[6] or uname,
-                                userid = tonumber(parts[5]),
-                                lastSeen = ts,
-                                lastLogin = ts,
-                                version = parts[4],
-                                isGuest = parts[7] == "1",
-                                source = "presence",
-                            })
-                        end
-                    end
-                end
-            end
-        end)
+local function CoreNtfyPost(topic, msg, title)
+    local any = false
+    for i, host in ipairs(HOLEX_CORE.hosts) do
+        local res = CoreHttp(host .. topic, "POST", msg, {
+            ["Content-Type"] = "text/plain",
+            ["Title"] = title or "holex",
+            ["Priority"] = "default",
+        })
+        local ok = res ~= nil and (res.StatusCode == 200 or res.StatusCode == 0 or (res.Body and #res.Body > 0))
+        CoreSetMethod("ntfy_post_" .. i .. "_" .. topic, ok)
+        if ok then any = true end
     end
-    SaveGlobalAccounts()
+    return any
 end
 
-local function IsHolexOnline(username)
+local function CoreNtfyPoll(topic, since)
+    since = since or "2h"
+    local events, seen = {}, {}
+    for i, host in ipairs(HOLEX_CORE.hosts) do
+        local res = CoreHttp(host .. topic .. "/json?poll=1&since=" .. since, "GET")
+        local ok = res and res.Body and #res.Body > 2
+        CoreSetMethod("ntfy_poll_" .. i .. "_" .. topic, ok)
+        if ok then
+            for line in string.gmatch(res.Body, "[^\r\n]+") do
+                local obj
+                pcall(function() obj = HttpService:JSONDecode(line) end)
+                if type(obj) == "table" and obj.event == "message" and obj.message and obj.id and not seen[obj.id] then
+                    seen[obj.id] = true
+                    table.insert(events, obj)
+                end
+            end
+        end
+    end
+    return events
+end
+
+local function CoreLoadDB()
+    pcall(function()
+        if isfile and isfile(HOLEX_CORE.dbFile) then
+            local d = HttpService:JSONDecode(readfile(HOLEX_CORE.dbFile))
+            if type(d) == "table" then
+                getgenv().HolexAccountDB.accounts = d.accounts or {}
+                getgenv().HolexAccountDB.events = d.events or {}
+                getgenv().HolexAccountDB.bans = d.bans or {}
+                getgenv().HolexAccountDB.stats = d.stats or getgenv().HolexAccountDB.stats
+            end
+        end
+    end)
+end
+
+local function CoreSaveDB()
+    pcall(function()
+        if makefolder and isfolder and not isfolder(HOLEX_DATA) then makefolder(HOLEX_DATA) end
+        if HolexEnsureDir then HolexEnsureDir(HOLEX_CORE.dbFile) end
+        local n = 0
+        for _ in pairs(getgenv().HolexAccountDB.accounts or {}) do n = n + 1 end
+        getgenv().HolexAccountDB.stats.totalAccounts = n
+        getgenv().HolexAccountDB.stats.lastUpdate = os.time()
+        writefile(HOLEX_CORE.dbFile, HttpService:JSONEncode({
+            accounts = getgenv().HolexAccountDB.accounts,
+            events = getgenv().HolexAccountDB.events,
+            bans = getgenv().HolexAccountDB.bans,
+            stats = getgenv().HolexAccountDB.stats,
+            savedAt = os.time(),
+            core = HOLEX_CORE.version,
+        }))
+    end)
+end
+
+CoreLoadDB()
+
+local function CoreDBEvent(kind, username, details)
+    table.insert(getgenv().HolexAccountDB.events, 1, {
+        kind = kind, username = username, details = details or "", at = os.time(),
+        placeId = game.PlaceId, by = (UserData and UserData.Username) or Player.Name,
+    })
+    while #getgenv().HolexAccountDB.events > 400 do table.remove(getgenv().HolexAccountDB.events) end
+end
+
+local function CoreUpsertAccount(entry, kind)
+    if not entry or not entry.username then return end
+    local key = string.lower(tostring(entry.username))
+    local prev = getgenv().HolexAccountDB.accounts[key] or {}
+    local isNew = prev.username == nil
+    local rec = {
+        username = entry.username,
+        display = entry.display or prev.display or entry.username,
+        userid = entry.userid or prev.userid,
+        robloxName = entry.robloxName or prev.robloxName,
+        isGuest = entry.isGuest,
+        isOwner = entry.isOwner or prev.isOwner,
+        version = entry.version or prev.version or HOLEX_VERSION,
+        createdAt = prev.createdAt or entry.createdAt or os.time(),
+        lastLogin = entry.lastLogin or prev.lastLogin or os.time(),
+        lastSeen = entry.lastSeen or os.time(),
+        placeId = entry.placeId or prev.placeId or game.PlaceId,
+        logins = (prev.logins or 0) + ((kind == "login" or kind == "create" or kind == "guest") and 1 or 0),
+        source = entry.source or kind or prev.source,
+        banned = prev.banned or false,
+        notes = prev.notes or "",
+    }
+    if isNew then
+        rec.logins = math.max(rec.logins, 1)
+        getgenv().HolexAccountDB.stats.totalCreated = (getgenv().HolexAccountDB.stats.totalCreated or 0) + 1
+    end
+    getgenv().HolexAccountDB.accounts[key] = rec
+    CoreDBEvent(kind or (isNew and "create" or "update"), entry.username, entry.robloxName or "")
+    CoreSaveDB()
+    return rec, isNew
+end
+
+local function CoreMarkOnline(uname, meta)
+    if not uname then return end
+    meta = meta or {}
+    local e = {
+        username = uname,
+        display = meta.display or uname,
+        userid = meta.userid,
+        lastSeen = meta.lastSeen or os.time(),
+        version = meta.version or HOLEX_VERSION,
+        hub = "HolexScriptHubV14",
+        source = meta.source or "core",
+    }
+    getgenv().HolexCloudPresence[uname] = e
+    getgenv().HolexCloudPresence[string.lower(uname)] = e
+    getgenv().HolexSeenUsers[string.lower(uname)] = { username = uname, at = e.lastSeen, version = e.version, display = e.display, userid = e.userid }
+    local key = string.lower(uname)
+    if getgenv().HolexAccountDB.accounts[key] then
+        getgenv().HolexAccountDB.accounts[key].lastSeen = e.lastSeen
+        getgenv().HolexAccountDB.accounts[key].version = e.version
+    end
+end
+
+local function CoreIsOnline(username)
     if not username then return false end
     local p = getgenv().HolexCloudPresence[username] or getgenv().HolexCloudPresence[string.lower(username)]
-    if type(p) == "table" and p.lastSeen and os.time() - p.lastSeen <= 50 then
-        return true, p
-    end
-    local acc = getgenv().HolexGlobalAccounts[string.lower(username)]
-    if type(acc) == "table" and acc.lastSeen and os.time() - acc.lastSeen <= 50 then
-        return true, acc
-    end
+    if type(p) == "table" and p.lastSeen and os.time() - p.lastSeen <= 55 then return true, p end
+    local acc = getgenv().HolexAccountDB.accounts[string.lower(username)]
+    if type(acc) == "table" and acc.lastSeen and os.time() - acc.lastSeen <= 55 then return true, acc end
     return false, nil
 end
 
-getgenv().HolexPublishAccount = PublishAccountEvent
-getgenv().HolexPollAccounts = PollAccountRegistry
-getgenv().HolexIsOnline = IsHolexOnline
-getgenv().HolexUpsertAccount = UpsertGlobalAccount
+local function CoreGetU()
+    if UserData.LoggedIn and UserData.Username and UserData.Username ~= "" then return tostring(UserData.Username) end
+    return nil
+end
+
+local lastNetDiscord = 0
+local function CorePublishPresence()
+    local uname = CoreGetU()
+    if not uname then return end
+    local payload = table.concat({
+        "presence", uname, tostring(os.time()), HOLEX_VERSION,
+        tostring(Player.UserId), tostring(Player.DisplayName or uname),
+        UserData.IsGuest and "1" or "0", tostring(UserData.JoinedAt or os.time()),
+    }, "|")
+    CoreNtfyPost(HOLEX_CORE.topicPresence, payload, "presence")
+    CoreMarkOnline(uname, { display = Player.DisplayName, userid = Player.UserId, lastSeen = os.time(), version = HOLEX_VERSION, source = "self" })
+    -- local presence file
+    pcall(function()
+        local online = {}
+        if isfile and isfile(HOLEX_CORE.presenceFile) then
+            pcall(function() online = HttpService:JSONDecode(readfile(HOLEX_CORE.presenceFile)) or {} end)
+        end
+        online[tostring(Player.UserId)] = getgenv().HolexCloudPresence[uname]
+        online["user:" .. string.lower(uname)] = getgenv().HolexCloudPresence[uname]
+        local now = os.time()
+        for k, p in pairs(online) do
+            if type(p) == "table" and now - (p.lastSeen or 0) > 90 then online[k] = nil end
+        end
+        if HolexEnsureDir then HolexEnsureDir(HOLEX_CORE.presenceFile) end
+        writefile(HOLEX_CORE.presenceFile, HttpService:JSONEncode(online))
+        CoreSetMethod("local_presence", true)
+    end)
+    pcall(function()
+        Player:SetAttribute("HolexV14", HOLEX_VERSION)
+        Player:SetAttribute("HolexUser", uname)
+    end)
+    if os.time() - lastNetDiscord >= 25 then
+        lastNetDiscord = os.time()
+        CoreDiscord(NETWORK_WEBHOOK, "Presence · " .. uname,
+            "**" .. uname .. "** online on Holex V14\nPlace `" .. tostring(game.PlaceId) .. "`", 5763719)
+    end
+end
+
+local function CorePublishAccount(kind, username, isGuest)
+    username = tostring(username or CoreGetU() or "")
+    if username == "" then return end
+    local entry = {
+        username = username, display = Player.DisplayName, userid = Player.UserId,
+        robloxName = Player.Name, isGuest = isGuest and true or false,
+        isOwner = UserData.IsOwner and true or false, version = HOLEX_VERSION,
+        createdAt = os.time(), lastLogin = os.time(), lastSeen = os.time(),
+        placeId = game.PlaceId, source = kind or "login",
+    }
+    local rec, isNew = CoreUpsertAccount(entry, kind or "login")
+    local payload = table.concat({
+        "account", kind or "login", username, tostring(os.time()), HOLEX_VERSION,
+        tostring(Player.UserId), Player.Name, isGuest and "1" or "0",
+        UserData.IsOwner and "1" or "0", tostring(game.PlaceId),
+    }, "|")
+    CoreNtfyPost(HOLEX_CORE.topicAccounts, payload, "account")
+    CorePublishPresence()
+    if kind == "create" or isNew then
+        CoreDiscord(WEBHOOK_URL, "New Holex Account Created",
+            "**" .. username .. "**" .. (isGuest and " (Guest)" or " (Registered)"), 5763719, {
+                { name = "Roblox Name", value = Player.Name, inline = true },
+                { name = "Roblox ID", value = tostring(Player.UserId), inline = true },
+                { name = "Owner", value = tostring(UserData.IsOwner), inline = true },
+                { name = "Place", value = tostring(game.PlaceId), inline = true },
+            })
+    end
+    CoreDiscord(NETWORK_WEBHOOK, isNew and "DB · New Account" or ("DB · " .. tostring(kind)),
+        "**" .. username .. "** · " .. (isGuest and "Guest" or "Registered"),
+        isNew and 5763719 or 3447003, {
+            { name = "Total", value = tostring(getgenv().HolexAccountDB.stats.totalAccounts or 0), inline = true },
+        })
+    CoreLog("account " .. tostring(kind) .. " " .. username)
+    return rec
+end
+
+local function CorePublishChat(msg)
+    local uname = CoreGetU()
+    if not uname then return false end
+    local safe = tostring(msg):gsub("|", "/")
+    local ts = os.time()
+    local ok = CoreNtfyPost(HOLEX_CORE.topicChat, table.concat({ "chat", uname, safe, tostring(ts) }, "|"), "chat")
+    pcall(function()
+        local data = { messages = {} }
+        if isfile and isfile(HOLEX_CORE.chatFile) then
+            pcall(function() data = HttpService:JSONDecode(readfile(HOLEX_CORE.chatFile)) or data end)
+        end
+        data.messages = data.messages or {}
+        table.insert(data.messages, { u = uname, m = msg, t = ts })
+        while #data.messages > 100 do table.remove(data.messages, 1) end
+        if HolexEnsureDir then HolexEnsureDir(HOLEX_CORE.chatFile) end
+        writefile(HOLEX_CORE.chatFile, HttpService:JSONEncode(data))
+    end)
+    CoreDiscord(NETWORK_WEBHOOK, "Chat · " .. uname, "**" .. uname .. ":** " .. tostring(msg):sub(1, 400), 3447003)
+    CoreLog("chat " .. uname .. ": " .. tostring(msg):sub(1, 40))
+    return ok
+end
+
+local function CoreHandleEvent(ev)
+    if not ev or not ev.id or getgenv().HolexChatSeen[ev.id] then return end
+    getgenv().HolexChatSeen[ev.id] = true
+    local parts = {}
+    for part in string.gmatch(tostring(ev.message or ""), "[^|]+") do table.insert(parts, part) end
+    local kind = parts[1]
+    if kind == "presence" and parts[2] then
+        CoreMarkOnline(parts[2], {
+            lastSeen = tonumber(parts[3]) or os.time(), version = parts[4],
+            userid = tonumber(parts[5]), display = parts[6] or parts[2], source = "ntfy",
+        })
+        if not getgenv().HolexAccountDB.accounts[string.lower(parts[2])] then
+            CoreUpsertAccount({
+                username = parts[2], display = parts[6], userid = tonumber(parts[5]),
+                lastSeen = tonumber(parts[3]), version = parts[4], isGuest = parts[7] == "1", source = "presence",
+            }, "presence")
+        end
+    elseif kind == "account" and parts[3] then
+        CoreUpsertAccount({
+            username = parts[3], createdAt = tonumber(parts[4]), lastLogin = tonumber(parts[4]),
+            lastSeen = tonumber(parts[4]), version = parts[5], userid = tonumber(parts[6]),
+            robloxName = parts[7], isGuest = parts[8] == "1", isOwner = parts[9] == "1",
+            placeId = tonumber(parts[10]), source = parts[2],
+        }, parts[2])
+    elseif kind == "chat" and parts[2] and parts[3] then
+        local uname, textMsg, ts = parts[2], parts[3], tonumber(parts[4])
+        local key = "show|" .. tostring(ts) .. "|" .. uname .. "|" .. textMsg
+        if not getgenv().HolexChatSeen[key] then
+            getgenv().HolexChatSeen[key] = true
+            if getgenv().HolexAddChatLine then getgenv().HolexAddChatLine(uname, textMsg, ts) end
+            local me = CoreGetU()
+            if not me or string.lower(uname) ~= string.lower(me) then
+                CoreLog("recv " .. uname .. ": " .. textMsg:sub(1, 30))
+                pcall(function() HolexLib:Notify("Chat · " .. uname, textMsg:sub(1, 80), 3, Config.AccentColor) end)
+            end
+        end
+        CoreMarkOnline(uname, { lastSeen = ts or os.time(), display = uname, source = "chat" })
+    elseif kind == "typing" and parts[2] then
+        getgenv().HolexTypingUsers[parts[2]] = { at = tonumber(parts[3]) or os.time() }
+    end
+end
+
+local function CorePollAll()
+    for _, ev in ipairs(CoreNtfyPoll(HOLEX_CORE.topicPresence, "1h")) do pcall(CoreHandleEvent, ev) end
+    for _, ev in ipairs(CoreNtfyPoll(HOLEX_CORE.topicAccounts, "24h")) do pcall(CoreHandleEvent, ev) end
+    for _, ev in ipairs(CoreNtfyPoll(HOLEX_CORE.topicChat, "2h")) do pcall(CoreHandleEvent, ev) end
+    -- local presence
+    pcall(function()
+        if isfile and isfile(HOLEX_CORE.presenceFile) then
+            local online = HttpService:JSONDecode(readfile(HOLEX_CORE.presenceFile)) or {}
+            local now = os.time()
+            for _, p in pairs(online) do
+                if type(p) == "table" and p.username and now - (p.lastSeen or 0) <= 90 then
+                    CoreMarkOnline(p.username, p)
+                end
+            end
+        end
+    end)
+    CoreSaveDB()
+end
+
+local function CoreBan(username, reason)
+    if not UserData.IsOwner then return false, "Owner only" end
+    local key = string.lower(username)
+    getgenv().HolexAccountDB.bans[key] = { username = username, reason = reason or "Banned", at = os.time() }
+    if getgenv().HolexAccountDB.accounts[key] then
+        getgenv().HolexAccountDB.accounts[key].banned = true
+        getgenv().HolexAccountDB.accounts[key].notes = reason or "Banned"
+    end
+    CoreSaveDB()
+    CoreDBEvent("ban", username, reason or "")
+    CoreDiscord(NETWORK_WEBHOOK, "Banned", "**" .. username .. "** — " .. tostring(reason or ""), 15548997)
+    return true, "Banned " .. username
+end
+
+local function CoreUnban(username)
+    if not UserData.IsOwner then return false, "Owner only" end
+    local key = string.lower(username)
+    getgenv().HolexAccountDB.bans[key] = nil
+    if getgenv().HolexAccountDB.accounts[key] then getgenv().HolexAccountDB.accounts[key].banned = false end
+    CoreSaveDB()
+    CoreDBEvent("unban", username, "")
+    return true, "Unbanned " .. username
+end
+
+local function CoreMethodCount()
+    local n = 0
+    for _, v in pairs(HOLEX_CORE.methods) do if v then n = n + 1 end end
+    return n
+end
+
+getgenv().HolexPublishAccount = CorePublishAccount
+getgenv().HolexPublishPresence = CorePublishPresence
+getgenv().HolexPublishChat = CorePublishChat
+getgenv().HolexPollNetwork = CorePollAll
+getgenv().HolexIsOnline = CoreIsOnline
+getgenv().HolexBanAccount = CoreBan
+getgenv().HolexUnbanAccount = CoreUnban
+getgenv().HolexCoreMethodCount = CoreMethodCount
+getgenv().HolexCoreLog = CoreLog
+
+-- background core loop
+task.spawn(function()
+    task.wait(2)
+    while true do
+        pcall(function()
+            if CoreGetU() then
+                CorePublishPresence()
+                CorePollAll()
+            end
+        end)
+        task.wait(3)
+    end
+end)
 
     pcall(function()
         local path = HOLEX_DATA .. "/userdata.json"
@@ -4054,7 +4240,7 @@ end
 -- ==================== DISCORD WEBHOOK ====================
 local function SendDiscordWebhook(username, isGuest)
     pcall(function()
-        if PublishAccountEvent then PublishAccountEvent("create", username, isGuest) end
+        if CorePublishAccount then CorePublishAccount("create", username, isGuest) end
     end)
     if not WEBHOOK_URL or WEBHOOK_URL == "" then return end
     pcall(function()
@@ -4947,273 +5133,273 @@ mainSec:CreateButton({
 })
 
 
--- ==================== MAIN TAB: GLOBAL ACCOUNTS ====================
-local accSec = MainTab:CreateSection("Holex Accounts Registry")
-accSec:CreateParagraph({
-    Title = "All Holex Accounts",
-    Content = "Accounts created/seen on Holex V14.\nGreen = currently running Holex Script Hub V14.\nClick a row for full details."
+-- ==================== MAIN: POWER ACCOUNTS + OWNER DB ====================
+local pubSec = MainTab:CreateSection("Holex Accounts")
+pubSec:CreateParagraph({
+    Title = "Live Account Registry",
+    Content = "All Holex V14 accounts. Green = online on the hub now.\nPowered by Holex Power Core."
 })
-
-local AccStatusPara = accSec:CreateParagraph({
-    Title = "Registry Status",
-    Content = "Loading accounts..."
-})
-
-accSec:CreateButton({
-    Title = "Refresh Accounts + Online",
-    Description = "Poll network for accounts and online status",
+local pubStat = pubSec:CreateParagraph({ Title = "Status", Content = "..." })
+pubSec:CreateButton({
+    Title = "Refresh Registry",
     Callback = function()
         pcall(function()
-            if PollAccountRegistry then PollAccountRegistry() end
-            if PublishAccountEvent and UserData.LoggedIn then
-                PublishAccountEvent("heartbeat", UserData.Username, UserData.IsGuest)
-            end
+            if CorePollAll then CorePollAll() end
+            if CorePublishPresence then CorePublishPresence() end
         end)
-        if getgenv().HolexRefreshAccountList then getgenv().HolexRefreshAccountList() end
-        HolexLib:Notify("Accounts", "Registry refreshed", 3, Config.SuccessColor)
+        if getgenv().HolexRefreshPublicAcc then getgenv().HolexRefreshPublicAcc() end
+        HolexLib:Notify("Core", "Registry refreshed · " .. tostring(CoreMethodCount and CoreMethodCount() or 0) .. " methods", 3, Config.SuccessColor)
     end
 })
+local PubF = Instance.new("Frame")
+PubF.Size = UDim2.new(1, 0, 0, 280)
+PubF.BackgroundColor3 = Color3.fromRGB(12, 12, 18)
+PubF.BorderSizePixel = 0
+PubF.Parent = pubSec.Content
+Instance.new("UICorner", PubF).CornerRadius = UDim.new(0, 8)
+local PubS = Instance.new("ScrollingFrame")
+PubS.Size = UDim2.new(1, -8, 1, -8)
+PubS.Position = UDim2.new(0, 4, 0, 4)
+PubS.BackgroundTransparency = 1
+PubS.ScrollBarThickness = 4
+PubS.AutomaticCanvasSize = Enum.AutomaticSize.Y
+PubS.Parent = PubF
+local PubL = Instance.new("UIListLayout", PubS)
+PubL.Padding = UDim.new(0, 3)
 
-local AccListFrame = Instance.new("Frame")
-AccListFrame.Size = UDim2.new(1, 0, 0, 320)
-AccListFrame.BackgroundColor3 = Color3.fromRGB(12, 12, 18)
-AccListFrame.BorderSizePixel = 0
-AccListFrame.Parent = accSec.Content
-Instance.new("UICorner", AccListFrame).CornerRadius = UDim.new(0, 8)
-
-local AccScroll = Instance.new("ScrollingFrame")
-AccScroll.Size = UDim2.new(1, -10, 1, -10)
-AccScroll.Position = UDim2.new(0, 5, 0, 5)
-AccScroll.BackgroundTransparency = 1
-AccScroll.BorderSizePixel = 0
-AccScroll.ScrollBarThickness = 4
-AccScroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
-AccScroll.CanvasSize = UDim2.new(0, 0, 0, 0)
-AccScroll.Parent = AccListFrame
-local AccLayout = Instance.new("UIListLayout", AccScroll)
-AccLayout.Padding = UDim.new(0, 4)
-AccLayout.SortOrder = Enum.SortOrder.LayoutOrder
-
-local function OpenAccountDetail(acc)
-    if type(acc) ~= "table" then return end
-    local online = false
-    if IsHolexOnline then
-        online = select(1, IsHolexOnline(acc.username))
-    end
+local function OpenAcc(acc)
+    local online = select(1, CoreIsOnline(acc.username))
     local gui = Instance.new("ScreenGui")
-    gui.Name = "HolexAccountDetail"
+    gui.Name = "HolexAcc"
     gui.ResetOnSpawn = false
     pcall(function() gui.Parent = (gethui and gethui()) or CoreGui end)
     if not gui.Parent then gui.Parent = Player:WaitForChild("PlayerGui") end
-
-    local frame = Instance.new("Frame")
-    frame.Size = UDim2.new(0, 400, 0, 360)
-    frame.Position = UDim2.new(0.5, -200, 0.5, -180)
-    frame.BackgroundColor3 = Config.MainColor
-    frame.BorderSizePixel = 0
-    frame.Parent = gui
-    Instance.new("UICorner", frame).CornerRadius = UDim.new(0, 14)
-    local stroke = Instance.new("UIStroke", frame)
-    stroke.Color = online and Color3.fromRGB(40, 220, 140) or Config.StrokeColor
-    stroke.Thickness = 1.5
-
-    local close = Instance.new("TextButton")
-    close.Size = UDim2.new(0, 32, 0, 32)
-    close.Position = UDim2.new(1, -40, 0, 10)
-    close.BackgroundColor3 = Config.ErrorColor
-    close.Text = "X"
-    close.Font = Enum.Font.GothamBold
-    close.TextColor3 = Color3.new(1, 1, 1)
-    close.Parent = frame
-    Instance.new("UICorner", close).CornerRadius = UDim.new(0, 6)
-    close.MouseButton1Click:Connect(function() gui:Destroy() end)
-
-    local title = Instance.new("TextLabel")
-    title.Size = UDim2.new(1, -60, 0, 28)
-    title.Position = UDim2.new(0, 16, 0, 12)
-    title.BackgroundTransparency = 1
-    title.Font = Enum.Font.GothamBold
-    title.TextSize = 18
-    title.TextColor3 = Config.TextColor
-    title.TextXAlignment = Enum.TextXAlignment.Left
-    title.Text = tostring(acc.username)
-    title.Parent = frame
-
-    local status = Instance.new("TextLabel")
-    status.Size = UDim2.new(1, -30, 0, 22)
-    status.Position = UDim2.new(0, 16, 0, 44)
-    status.BackgroundTransparency = 1
-    status.Font = Enum.Font.Gotham
-    status.TextSize = 14
-    status.TextXAlignment = Enum.TextXAlignment.Left
-    status.Text = online and "● ONLINE · Running Holex Script Hub V14" or "○ Offline"
-    status.TextColor3 = online and Color3.fromRGB(80, 220, 120) or Config.DimTextColor
-    status.Parent = frame
-
+    local f = Instance.new("Frame")
+    f.Size = UDim2.new(0, 390, 0, 340)
+    f.Position = UDim2.new(0.5, -195, 0.5, -170)
+    f.BackgroundColor3 = Config.MainColor
+    f.Parent = gui
+    Instance.new("UICorner", f).CornerRadius = UDim.new(0, 12)
+    Instance.new("UIStroke", f).Color = online and Color3.fromRGB(40, 220, 140) or Config.StrokeColor
+    local x = Instance.new("TextButton")
+    x.Size = UDim2.new(0, 30, 0, 30)
+    x.Position = UDim2.new(1, -38, 0, 8)
+    x.BackgroundColor3 = Config.ErrorColor
+    x.Text = "X"
+    x.TextColor3 = Color3.new(1,1,1)
+    x.Font = Enum.Font.GothamBold
+    x.Parent = f
+    Instance.new("UICorner", x).CornerRadius = UDim.new(0, 6)
+    x.MouseButton1Click:Connect(function() gui:Destroy() end)
     local body = Instance.new("TextLabel")
-    body.Size = UDim2.new(1, -32, 0, 200)
-    body.Position = UDim2.new(0, 16, 0, 78)
+    body.Size = UDim2.new(1, -28, 1, -20)
+    body.Position = UDim2.new(0, 14, 0, 12)
     body.BackgroundTransparency = 1
     body.Font = Enum.Font.Gotham
     body.TextSize = 13
-    body.TextColor3 = Config.SubTextColor
+    body.TextColor3 = Config.TextColor
     body.TextXAlignment = Enum.TextXAlignment.Left
     body.TextYAlignment = Enum.TextYAlignment.Top
     body.TextWrapped = true
-    local created = acc.createdAt and os.date("%Y-%m-%d %H:%M", acc.createdAt) or "Unknown"
-    local lastLogin = acc.lastLogin and os.date("%Y-%m-%d %H:%M", acc.lastLogin) or "Unknown"
-    local lastSeen = acc.lastSeen and os.date("%Y-%m-%d %H:%M", acc.lastSeen) or "Unknown"
     body.Text = string.format(
-        "Holex Username: %s\nDisplay: %s\nAccount Type: %s\nOwner: %s\n\nRoblox Name: %s\nRoblox UserId: %s\n\nCreated: %s\nLast Login: %s\nLast Seen: %s\nHolex Version: %s\nPlaceId: %s\nSource: %s",
+        "%s\n%s\n\nType: %s | Owner: %s\nRoblox: %s (%s)\nCreated: %s\nLast login: %s\nLast seen: %s\nVersion: %s\nPlace: %s\nLogins: %s\nBanned: %s\nSource: %s",
         tostring(acc.username),
-        tostring(acc.display or acc.username),
+        online and "ONLINE · Holex Script Hub V14" or "Offline",
         acc.isGuest and "Guest" or "Registered",
         acc.isOwner and "Yes" or "No",
-        tostring(acc.robloxName or "—"),
-        tostring(acc.userid or "—"),
-        created, lastLogin, lastSeen,
+        tostring(acc.robloxName or "—"), tostring(acc.userid or "—"),
+        acc.createdAt and os.date("%Y-%m-%d %H:%M", acc.createdAt) or "?",
+        acc.lastLogin and os.date("%Y-%m-%d %H:%M", acc.lastLogin) or "?",
+        acc.lastSeen and os.date("%Y-%m-%d %H:%M", acc.lastSeen) or "?",
         tostring(acc.version or HOLEX_VERSION),
         tostring(acc.placeId or "—"),
+        tostring(acc.logins or 1),
+        acc.banned and "YES" or "No",
         tostring(acc.source or "—")
     )
-    body.Parent = frame
-
-    local addBtn = Instance.new("TextButton")
-    addBtn.Size = UDim2.new(1, -32, 0, 34)
-    addBtn.Position = UDim2.new(0, 16, 1, -50)
-    addBtn.BackgroundColor3 = Config.AccentColor
-    addBtn.Text = "Add as Holex Friend"
-    addBtn.Font = Enum.Font.GothamBold
-    addBtn.TextSize = 13
-    addBtn.TextColor3 = Color3.new(1, 1, 1)
-    addBtn.Parent = frame
-    Instance.new("UICorner", addBtn).CornerRadius = UDim.new(0, 8)
-    addBtn.MouseButton1Click:Connect(function()
-        if getgenv().HolexAddFriend then
-            local ok, msg = getgenv().HolexAddFriend(acc.username)
-            HolexLib:Notify("Friends", tostring(msg), 4, ok and Config.SuccessColor or Config.WarningColor)
-        else
-            HolexLib:Notify("Friends", "Friends system not ready yet", 3, Config.WarningColor)
-        end
-    end)
+    body.Parent = f
 end
 
-local function RefreshAccountList()
-    for _, child in ipairs(AccScroll:GetChildren()) do
-        if not child:IsA("UIListLayout") then child:Destroy() end
-    end
-    pcall(function()
-        if PollAccountRegistry then PollAccountRegistry() end
-    end)
+local function RefreshPublicAcc()
+    for _, c in ipairs(PubS:GetChildren()) do if not c:IsA("UIListLayout") then c:Destroy() end end
     local list = {}
-    for _, acc in pairs(getgenv().HolexGlobalAccounts or {}) do
-        if type(acc) == "table" and acc.username then
-            table.insert(list, acc)
-        end
+    for _, a in pairs(getgenv().HolexAccountDB.accounts or {}) do
+        if type(a) == "table" and a.username then table.insert(list, a) end
     end
     table.sort(list, function(a, b)
-        local ao = select(1, IsHolexOnline(a.username)) and 1 or 0
-        local bo = select(1, IsHolexOnline(b.username)) and 1 or 0
+        local ao = select(1, CoreIsOnline(a.username)) and 1 or 0
+        local bo = select(1, CoreIsOnline(b.username)) and 1 or 0
         if ao ~= bo then return ao > bo end
         return (a.lastSeen or 0) > (b.lastSeen or 0)
     end)
-    local onlineCount = 0
+    local onC = 0
     for _, acc in ipairs(list) do
-        local online = select(1, IsHolexOnline(acc.username))
-        if online then onlineCount = onlineCount + 1 end
+        local online = select(1, CoreIsOnline(acc.username))
+        if online then onC = onC + 1 end
         local row = Instance.new("TextButton")
-        row.Size = UDim2.new(1, 0, 0, 44)
+        row.Size = UDim2.new(1, 0, 0, 36)
         row.BackgroundColor3 = online and Color3.fromRGB(16, 42, 28) or Color3.fromRGB(22, 22, 32)
-        row.BorderSizePixel = 0
         row.Text = ""
-        row.AutoButtonColor = true
-        row.Parent = AccScroll
-        Instance.new("UICorner", row).CornerRadius = UDim.new(0, 6)
-
-        local dot = Instance.new("Frame")
-        dot.Size = UDim2.new(0, 10, 0, 10)
-        dot.Position = UDim2.new(0, 10, 0.5, -5)
-        dot.BackgroundColor3 = online and Color3.fromRGB(40, 220, 140) or Color3.fromRGB(90, 90, 105)
-        dot.BorderSizePixel = 0
-        dot.Parent = row
-        Instance.new("UICorner", dot).CornerRadius = UDim.new(1, 0)
-
-        local nameL = Instance.new("TextLabel")
-        nameL.Size = UDim2.new(1, -100, 0, 18)
-        nameL.Position = UDim2.new(0, 28, 0, 5)
-        nameL.BackgroundTransparency = 1
-        nameL.Font = Enum.Font.GothamBold
-        nameL.TextSize = 13
-        nameL.TextColor3 = Config.TextColor
-        nameL.TextXAlignment = Enum.TextXAlignment.Left
-        nameL.Text = tostring(acc.username)
-        nameL.Parent = row
-
-        local subL = Instance.new("TextLabel")
-        subL.Size = UDim2.new(1, -100, 0, 16)
-        subL.Position = UDim2.new(0, 28, 0, 24)
-        subL.BackgroundTransparency = 1
-        subL.Font = Enum.Font.Gotham
-        subL.TextSize = 11
-        subL.TextColor3 = Config.DimTextColor
-        subL.TextXAlignment = Enum.TextXAlignment.Left
-        local when = acc.createdAt and os.date("%Y-%m-%d", acc.createdAt) or "?"
-        subL.Text = (acc.isGuest and "Guest" or "Registered") .. " · joined " .. when .. (online and " · ONLINE" or "")
-        subL.Parent = row
-
-        local badge = Instance.new("TextLabel")
-        badge.Size = UDim2.new(0, 64, 0, 20)
-        badge.Position = UDim2.new(1, -72, 0.5, -10)
-        badge.BackgroundColor3 = online and Color3.fromRGB(30, 120, 70) or Color3.fromRGB(50, 50, 60)
-        badge.Font = Enum.Font.GothamBold
-        badge.TextSize = 10
-        badge.TextColor3 = Color3.new(1, 1, 1)
-        badge.Text = online and "ONLINE" or "offline"
-        badge.Parent = row
-        Instance.new("UICorner", badge).CornerRadius = UDim.new(0, 4)
-
-        local capture = acc
-        row.MouseButton1Click:Connect(function()
-            OpenAccountDetail(capture)
-        end)
+        row.Parent = PubS
+        Instance.new("UICorner", row).CornerRadius = UDim.new(0, 5)
+        local nm = Instance.new("TextLabel")
+        nm.Size = UDim2.new(1, -70, 1, 0)
+        nm.Position = UDim2.new(0, 10, 0, 0)
+        nm.BackgroundTransparency = 1
+        nm.Font = Enum.Font.Gotham
+        nm.TextSize = 13
+        nm.TextColor3 = Config.TextColor
+        nm.TextXAlignment = Enum.TextXAlignment.Left
+        nm.Text = (online and "● " or "○ ") .. acc.username .. (acc.isGuest and " (guest)" or "")
+        nm.Parent = row
+        local bd = Instance.new("TextLabel")
+        bd.Size = UDim2.new(0, 56, 0, 18)
+        bd.Position = UDim2.new(1, -64, 0.5, -9)
+        bd.BackgroundColor3 = online and Color3.fromRGB(30, 120, 70) or Color3.fromRGB(50, 50, 60)
+        bd.Font = Enum.Font.GothamBold
+        bd.TextSize = 10
+        bd.TextColor3 = Color3.new(1,1,1)
+        bd.Text = online and "ONLINE" or "offline"
+        bd.Parent = row
+        Instance.new("UICorner", bd).CornerRadius = UDim.new(0, 4)
+        local cap = acc
+        row.MouseButton1Click:Connect(function() OpenAcc(cap) end)
     end
-    if #list == 0 then
-        local empty = Instance.new("TextLabel")
-        empty.Size = UDim2.new(1, 0, 0, 40)
-        empty.BackgroundTransparency = 1
-        empty.Font = Enum.Font.Gotham
-        empty.TextSize = 12
-        empty.TextColor3 = Config.DimTextColor
-        empty.Text = "No accounts yet — logins will appear here"
-        empty.Parent = AccScroll
+    if pubStat and pubStat.SetValue then
+        pubStat:SetValue(string.format("%d accounts · %d online · core %s", #list, onC, HOLEX_CORE.version))
     end
-    if AccStatusPara and AccStatusPara.SetValue then
-        AccStatusPara:SetValue(string.format("%d accounts · %d online on Holex V14", #list, onlineCount))
-    end
-    pcall(function()
-        AccScroll.CanvasSize = UDim2.new(0, 0, 0, AccLayout.AbsoluteContentSize.Y + 8)
-    end)
 end
-getgenv().HolexRefreshAccountList = RefreshAccountList
-getgenv().HolexOpenAccountDetail = OpenAccountDetail
+getgenv().HolexRefreshPublicAcc = RefreshPublicAcc
+
+if UserData.IsOwner then
+    local own = MainTab:CreateSection("OWNER · Power Database")
+    own:CreateParagraph({
+        Title = "Full Account Database",
+        Content = "Owner-only. Ban tools, export, events, full registry."
+    })
+    local ownStat = own:CreateParagraph({ Title = "DB Stats", Content = "..." })
+    local banIn = own:CreateInput({ Title = "Username", Placeholder = "ban / unban target" })
+    own:CreateButton({
+        Title = "Ban Account",
+        Callback = function()
+            local ok, msg = CoreBan(banIn and banIn.Text or "", "Banned by owner")
+            HolexLib:Notify("DB", tostring(msg), 3, ok and Config.SuccessColor or Config.ErrorColor)
+            if getgenv().HolexRefreshOwnerDB then getgenv().HolexRefreshOwnerDB() end
+        end
+    })
+    own:CreateButton({
+        Title = "Unban Account",
+        Callback = function()
+            local ok, msg = CoreUnban(banIn and banIn.Text or "")
+            HolexLib:Notify("DB", tostring(msg), 3, ok and Config.SuccessColor or Config.ErrorColor)
+            if getgenv().HolexRefreshOwnerDB then getgenv().HolexRefreshOwnerDB() end
+        end
+    })
+    own:CreateButton({
+        Title = "Export DB → Discord Network Webhook",
+        Callback = function()
+            local lines, n = {}, 0
+            for _, a in pairs(getgenv().HolexAccountDB.accounts or {}) do
+                if type(a) == "table" then
+                    n = n + 1
+                    if #lines < 30 then
+                        table.insert(lines, string.format("`%s` %s id:%s", a.username, a.isGuest and "guest" or "reg", tostring(a.userid or "?")))
+                    end
+                end
+            end
+            CoreDiscord(NETWORK_WEBHOOK, "Owner DB Export", "**" .. n .. " accounts**\n" .. table.concat(lines, "\n"), 15844367)
+            HolexLib:Notify("DB", "Exported " .. n .. " accounts", 3, Config.SuccessColor)
+        end
+    })
+    own:CreateButton({
+        Title = "Force Core Sync",
+        Callback = function()
+            CorePollAll()
+            CorePublishPresence()
+            CoreSaveDB()
+            RefreshPublicAcc()
+            if getgenv().HolexRefreshOwnerDB then getgenv().HolexRefreshOwnerDB() end
+            HolexLib:Notify("Core", CoreMethodCount() .. " methods active", 3, Config.SuccessColor)
+        end
+    })
+    local OwnF = Instance.new("Frame")
+    OwnF.Size = UDim2.new(1, 0, 0, 240)
+    OwnF.BackgroundColor3 = Color3.fromRGB(18, 14, 10)
+    OwnF.Parent = own.Content
+    Instance.new("UICorner", OwnF).CornerRadius = UDim.new(0, 8)
+    local OwnS = Instance.new("ScrollingFrame")
+    OwnS.Size = UDim2.new(1, -8, 1, -8)
+    OwnS.Position = UDim2.new(0, 4, 0, 4)
+    OwnS.BackgroundTransparency = 1
+    OwnS.ScrollBarThickness = 4
+    OwnS.AutomaticCanvasSize = Enum.AutomaticSize.Y
+    OwnS.Parent = OwnF
+    Instance.new("UIListLayout", OwnS).Padding = UDim.new(0, 2)
+    local function RefreshOwnerDB()
+        for _, c in ipairs(OwnS:GetChildren()) do if not c:IsA("UIListLayout") then c:Destroy() end end
+        local list, onC, banC = {}, 0, 0
+        for _, a in pairs(getgenv().HolexAccountDB.accounts or {}) do
+            if type(a) == "table" and a.username then table.insert(list, a) end
+        end
+        table.sort(list, function(a, b) return (a.lastSeen or 0) > (b.lastSeen or 0) end)
+        for _, a in ipairs(list) do
+            if select(1, CoreIsOnline(a.username)) then onC = onC + 1 end
+            if a.banned then banC = banC + 1 end
+            local l = Instance.new("TextLabel")
+            l.Size = UDim2.new(1, 0, 0, 18)
+            l.BackgroundTransparency = 1
+            l.Font = Enum.Font.Gotham
+            l.TextSize = 11
+            l.TextColor3 = a.banned and Config.ErrorColor or Config.TextColor
+            l.TextXAlignment = Enum.TextXAlignment.Left
+            l.Text = string.format(" %s %s | %s | logins %s%s",
+                select(1, CoreIsOnline(a.username)) and "●" or "○",
+                a.username, tostring(a.robloxName or "?"), tostring(a.logins or 1),
+                a.banned and " BANNED" or "")
+            l.Parent = OwnS
+        end
+        for i, ev in ipairs(getgenv().HolexAccountDB.events or {}) do
+            if i > 12 then break end
+            if i == 1 then
+                local h = Instance.new("TextLabel")
+                h.Size = UDim2.new(1, 0, 0, 18)
+                h.BackgroundTransparency = 1
+                h.Font = Enum.Font.GothamBold
+                h.TextSize = 11
+                h.TextColor3 = Config.AccentColor
+                h.TextXAlignment = Enum.TextXAlignment.Left
+                h.Text = " Events"
+                h.Parent = OwnS
+            end
+            local e = Instance.new("TextLabel")
+            e.Size = UDim2.new(1, 0, 0, 16)
+            e.BackgroundTransparency = 1
+            e.Font = Enum.Font.Gotham
+            e.TextSize = 10
+            e.TextColor3 = Config.DimTextColor
+            e.TextXAlignment = Enum.TextXAlignment.Left
+            e.Text = string.format("  %s %s %s", os.date("%H:%M", ev.at or 0), tostring(ev.kind), tostring(ev.username))
+            e.Parent = OwnS
+        end
+        if ownStat and ownStat.SetValue then
+            ownStat:SetValue(string.format("Accounts %d · Online %d · Banned %d · Events %d · Methods %d",
+                #list, onC, banC, #(getgenv().HolexAccountDB.events or {}), CoreMethodCount()))
+        end
+    end
+    getgenv().HolexRefreshOwnerDB = RefreshOwnerDB
+end
 
 task.spawn(function()
     task.wait(1.5)
     pcall(function()
-        if UserData.LoggedIn and PublishAccountEvent then
-            PublishAccountEvent("session", UserData.Username, UserData.IsGuest)
-        end
-        if PollAccountRegistry then PollAccountRegistry() end
-        RefreshAccountList()
+        if CoreGetU() then CorePublishAccount("session", CoreGetU(), UserData.IsGuest) end
+        CorePollAll()
+        RefreshPublicAcc()
+        if UserData.IsOwner and getgenv().HolexRefreshOwnerDB then getgenv().HolexRefreshOwnerDB() end
     end)
-    while AccListFrame.Parent do
-        pcall(function()
-            if UserData.LoggedIn and PublishAccountEvent then
-                PublishAccountEvent("heartbeat", UserData.Username, UserData.IsGuest)
-            end
-            if PollAccountRegistry then PollAccountRegistry() end
-            RefreshAccountList()
-        end)
+    while PubF.Parent do
+        pcall(RefreshPublicAcc)
+        if UserData.IsOwner and getgenv().HolexRefreshOwnerDB then pcall(getgenv().HolexRefreshOwnerDB) end
         task.wait(5)
     end
 end)
@@ -7297,68 +7483,87 @@ consoleSec:CreateButton({
     Callback = function() HolexLogger:Info("TEST", "This is a test info log") end
 })
 
--- ==================== GLOBAL CHAT TAB ====================
+-- ==================== GLOBAL CHAT TAB (POWER CORE) ====================
 local ChatTab = MainWindow:CreateTab("GlobalChat")
-local chatSec = ChatTab:CreateSection("Global Chat")
+local chatSec = ChatTab:CreateSection("Global Network Chat")
 chatSec:CreateParagraph({
-    Title = "Holex Global Chat",
-    Content = "Embedded chat. Be respectful!\nNo swearing, harassment, or personal info.\nViolations result in bans."
+    Title = "Realtime Holex Chat",
+    Content = "Uses Power Core (multi-host ntfy + Discord + local).\nBoth users must run this script and stay logged in."
 })
-
-local ChatContainer = Instance.new("Frame")
-ChatContainer.Size = UDim2.new(1, 0, 0, 350)
-ChatContainer.BackgroundColor3 = Color3.fromRGB(10, 10, 18)
-ChatContainer.BorderSizePixel = 0
-ChatContainer.Parent = chatSec.Content
-Instance.new("UICorner", ChatContainer).CornerRadius = UDim.new(0, 8)
-
-local ChatMsgScroll = Instance.new("ScrollingFrame")
-ChatMsgScroll.Size = UDim2.new(1, -10, 1, -50)
-ChatMsgScroll.Position = UDim2.new(0, 5, 0, 5)
-ChatMsgScroll.BackgroundTransparency = 1
-ChatMsgScroll.CanvasSize = UDim2.new(0, 0, 0, 0)
-ChatMsgScroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
-ChatMsgScroll.ScrollBarThickness = 3
-ChatMsgScroll.Parent = ChatContainer
-
-local ChatMsgLayout = Instance.new("UIListLayout", ChatMsgScroll)
-ChatMsgLayout.Padding = UDim.new(0, 3)
-ChatMsgLayout.SortOrder = Enum.SortOrder.LayoutOrder
-
-local ChatInputBar = Instance.new("Frame")
-ChatInputBar.Size = UDim2.new(1, -10, 0, 36)
-ChatInputBar.Position = UDim2.new(0, 5, 0, 305)
-ChatInputBar.BackgroundColor3 = Color3.fromRGB(20, 20, 30)
-ChatInputBar.BorderSizePixel = 0
-ChatInputBar.Parent = ChatContainer
-Instance.new("UICorner", ChatInputBar).CornerRadius = UDim.new(0, 6)
-
-local ChatMsgInput = Instance.new("TextBox")
-ChatMsgInput.Size = UDim2.new(1, -80, 1, -8)
-ChatMsgInput.Position = UDim2.new(0, 8, 0, 4)
-ChatMsgInput.BackgroundTransparency = 1
-ChatMsgInput.Text = ""
-ChatMsgInput.PlaceholderText = "Type message..."
-ChatMsgInput.PlaceholderColor3 = Color3.fromRGB(120, 120, 130)
-ChatMsgInput.Font = Enum.Font.Gotham
-ChatMsgInput.TextSize = 14
-ChatMsgInput.TextColor3 = Color3.fromRGB(230, 230, 240)
-ChatMsgInput.TextXAlignment = Enum.TextXAlignment.Left
-ChatMsgInput.ClearTextOnFocus = false
-ChatMsgInput.Parent = ChatInputBar
-
-local ChatSendBtn = Instance.new("TextButton")
-ChatSendBtn.Size = UDim2.new(0, 65, 0, 28)
-ChatSendBtn.Position = UDim2.new(1, -73, 0.5, -14)
-ChatSendBtn.BackgroundColor3 = Config.AccentColor
-ChatSendBtn.Text = "Send"
-ChatSendBtn.Font = Enum.Font.GothamBold
-ChatSendBtn.TextSize = 13
-ChatSendBtn.TextColor3 = Color3.new(1, 1, 1)
-ChatSendBtn.Parent = ChatInputBar
-Instance.new("UICorner", ChatSendBtn).CornerRadius = UDim.new(0, 6)
-
-local function addChatMsg(user, msg, color)
+local chatNet = chatSec:CreateParagraph({ Title = "Network", Content = "Starting..." })
+chatSec:CreateButton({
+    Title = "Force Connect Power Core",
+    Callback = function()
+        if not CoreGetU() then HolexLib:Notify("Chat", "Log in first", 3, Config.WarningColor) return end
+        CorePublishPresence()
+        CorePollAll()
+        CoreDiscord(NETWORK_WEBHOOK, "Force Connect", CoreGetU() .. " forced core connect", 15844367)
+        HolexLib:Notify("Core", CoreMethodCount() .. " methods OK", 4, Config.SuccessColor)
+    end
+})
+local ChatBox = Instance.new("Frame")
+ChatBox.Size = UDim2.new(1, 0, 0, 360)
+ChatBox.BackgroundColor3 = Color3.fromRGB(10, 10, 18)
+ChatBox.BorderSizePixel = 0
+ChatBox.Parent = chatSec.Content
+Instance.new("UICorner", ChatBox).CornerRadius = UDim.new(0, 8)
+local ChatStatus = Instance.new("TextLabel")
+ChatStatus.Size = UDim2.new(1, -12, 0, 18)
+ChatStatus.Position = UDim2.new(0, 6, 0, 4)
+ChatStatus.BackgroundTransparency = 1
+ChatStatus.Font = Enum.Font.Gotham
+ChatStatus.TextSize = 11
+ChatStatus.TextXAlignment = Enum.TextXAlignment.Left
+ChatStatus.TextColor3 = Config.SubTextColor
+ChatStatus.Text = "..."
+ChatStatus.Parent = ChatBox
+local TypingLabel = Instance.new("TextLabel")
+TypingLabel.Size = UDim2.new(1, -12, 0, 14)
+TypingLabel.Position = UDim2.new(0, 6, 0, 22)
+TypingLabel.BackgroundTransparency = 1
+TypingLabel.Font = Enum.Font.Gotham
+TypingLabel.TextSize = 11
+TypingLabel.TextXAlignment = Enum.TextXAlignment.Left
+TypingLabel.TextColor3 = Color3.fromRGB(160, 160, 175)
+TypingLabel.Text = ""
+TypingLabel.Parent = ChatBox
+local ChatScroll = Instance.new("ScrollingFrame")
+ChatScroll.Size = UDim2.new(1, -10, 1, -85)
+ChatScroll.Position = UDim2.new(0, 5, 0, 38)
+ChatScroll.BackgroundTransparency = 1
+ChatScroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
+ChatScroll.ScrollBarThickness = 4
+ChatScroll.Parent = ChatBox
+Instance.new("UIListLayout", ChatScroll).Padding = UDim.new(0, 3)
+local InBar = Instance.new("Frame")
+InBar.Size = UDim2.new(1, -10, 0, 34)
+InBar.Position = UDim2.new(0, 5, 1, -40)
+InBar.BackgroundColor3 = Color3.fromRGB(20, 22, 32)
+InBar.Parent = ChatBox
+Instance.new("UICorner", InBar).CornerRadius = UDim.new(0, 6)
+local ChatIn = Instance.new("TextBox")
+ChatIn.Size = UDim2.new(1, -75, 1, -6)
+ChatIn.Position = UDim2.new(0, 8, 0, 3)
+ChatIn.BackgroundTransparency = 1
+ChatIn.PlaceholderText = "Message global network..."
+ChatIn.PlaceholderColor3 = Color3.fromRGB(120, 120, 140)
+ChatIn.Font = Enum.Font.Gotham
+ChatIn.TextSize = 13
+ChatIn.TextColor3 = Color3.fromRGB(235, 235, 245)
+ChatIn.TextXAlignment = Enum.TextXAlignment.Left
+ChatIn.Text = ""
+ChatIn.Parent = InBar
+local Send = Instance.new("TextButton")
+Send.Size = UDim2.new(0, 60, 0, 26)
+Send.Position = UDim2.new(1, -66, 0.5, -13)
+Send.BackgroundColor3 = Config.AccentColor
+Send.Text = "Send"
+Send.Font = Enum.Font.GothamBold
+Send.TextSize = 12
+Send.TextColor3 = Color3.new(1,1,1)
+Send.Parent = InBar
+Instance.new("UICorner", Send).CornerRadius = UDim.new(0, 6)
+local function addLine(user, msg, color, stamp)
     local lbl = Instance.new("TextLabel")
     lbl.Size = UDim2.new(1, -8, 0, 0)
     lbl.AutomaticSize = Enum.AutomaticSize.Y
@@ -7366,70 +7571,74 @@ local function addChatMsg(user, msg, color)
     lbl.TextWrapped = true
     lbl.RichText = true
     lbl.Font = Enum.Font.Gotham
-    lbl.TextSize = 14
+    lbl.TextSize = 13
     lbl.TextXAlignment = Enum.TextXAlignment.Left
-    lbl.TextYAlignment = Enum.TextYAlignment.Top
-    lbl.TextColor3 = Color3.new(1, 1, 1)
-    local hex = string.format("#%02X%02X%02X", math.floor(color.R * 255), math.floor(color.G * 255), math.floor(color.B * 255))
-    lbl.Text = string.format('<font color="%s"><b>%s</b></font>: %s', hex, user, msg)
-    lbl.Parent = ChatMsgScroll
-    task.wait(0.05)
-    ChatMsgScroll.CanvasPosition = Vector2.new(0, ChatMsgScroll.AbsoluteCanvasSize.Y)
+    lbl.TextColor3 = Color3.new(1,1,1)
+    color = color or Config.AccentColor
+    local hex = string.format("#%02X%02X%02X", math.floor(color.R*255), math.floor(color.G*255), math.floor(color.B*255))
+    local t = stamp and string.format(' <font color="#777788">%s</font>', os.date("%H:%M", tonumber(stamp) or os.time())) or ""
+    lbl.Text = string.format('<font color="%s"><b>%s</b></font>%s: %s', hex, tostring(user), t, tostring(msg))
+    lbl.Parent = ChatScroll
 end
-
-local badWords = {"pedophile", "pedo", "rape", "molest", "groom", "underage"}
-local function filterMessage(msg)
-    local lower = msg:lower()
-    for _, word in ipairs(badWords) do
-        if lower:find(word) then
-            return false, "Message contains prohibited content."
-        end
-    end
-    return true, msg
-end
-
-local function sendMsg()
-    local txt = ChatMsgInput.Text:match("^%s*(.-)%s*$")
+getgenv().HolexAddChatLine = function(u, m, t) addLine(u, m, Config.AccentColor, t) end
+local function doSend()
+    local uname = CoreGetU()
+    if not uname then addLine("SYSTEM", "Log in first", Config.WarningColor) return end
+    local txt = string.match(ChatIn.Text or "", "^%s*(.-)%s*$") or ""
     if txt == "" then return end
-    ChatMsgInput.Text = ""
-    local ok, filtered = filterMessage(txt)
-    if not ok then
-        addChatMsg("SYSTEM", filtered, Config.ErrorColor)
-        IssueBan(UserData.Username, 1, "Inappropriate content in chat")
-        return
-    end
-    addChatMsg(UserData.Username, filtered, Config.AccentColor)
-    pcall(function()
-        local path = CHAT_FOLDER .. "/global_chat.json"
-        local data = {messages = {}}
-        if isfile(path) then data = HttpService:JSONDecode(readfile(path)) end
-        table.insert(data.messages, {
-            u = UserData.Username, m = filtered,
-            c = string.format("%d,%d,%d", math.floor(Config.AccentColor.R * 255), math.floor(Config.AccentColor.G * 255), math.floor(Config.AccentColor.B * 255)),
-            t = os.time()
-        })
-        while #data.messages > 50 do table.remove(data.messages, 1) end
-        writefile(path, HttpService:JSONEncode(data))
-    end)
+    ChatIn.Text = ""
+    local ts = os.time()
+    getgenv().HolexChatSeen["show|" .. ts .. "|" .. uname .. "|" .. txt] = true
+    CorePublishChat(txt)
+    CorePublishPresence()
+    addLine(uname, txt, Config.AccentColor, ts)
 end
-
-ChatSendBtn.MouseButton1Click:Connect(sendMsg)
-ChatMsgInput.FocusLost:Connect(function(enter) if enter then sendMsg() end end)
-
-task.spawn(function()
-    pcall(function()
-        local path = CHAT_FOLDER .. "/global_chat.json"
-        if isfile(path) then
-            local data = HttpService:JSONDecode(readfile(path))
-            for _, m in ipairs(data.messages) do
-                local parts = m.c:split(",")
-                local c = Color3.fromRGB(tonumber(parts[1]), tonumber(parts[2]), tonumber(parts[3]))
-                addChatMsg(m.u, m.m, c)
-            end
-        end
-    end)
+Send.MouseButton1Click:Connect(doSend)
+ChatIn.FocusLost:Connect(function(e) if e then doSend() end end)
+local lastType = 0
+ChatIn:GetPropertyChangedSignal("Text"):Connect(function()
+    if CoreGetU() and os.time() - lastType >= 2 then
+        lastType = os.time()
+        task.spawn(function()
+            CoreNtfyPost(HOLEX_CORE.topicChat, "typing|" .. CoreGetU() .. "|" .. tostring(os.time()), "typing")
+        end)
+    end
 end)
-
+task.spawn(function()
+    task.wait(1)
+    if CoreGetU() then
+        addLine("SYSTEM", "Power Core chat online", Config.SuccessColor)
+        CorePublishPresence()
+        CorePollAll()
+    else
+        addLine("SYSTEM", "Log in to chat", Config.WarningColor)
+    end
+    while ChatBox.Parent do
+        if CoreGetU() then
+            pcall(CorePollAll)
+            local n, names = 0, {}
+            for k, p in pairs(getgenv().HolexCloudPresence or {}) do
+                if type(p) == "table" and p.username and k == p.username and os.time() - (p.lastSeen or 0) <= 55 then
+                    n = n + 1
+                    table.insert(names, p.username)
+                end
+            end
+            ChatStatus.Text = string.format("CORE | %s | %d online | %d methods", CoreGetU() or "?", n, CoreMethodCount())
+            ChatStatus.TextColor3 = Config.SuccessColor
+            if chatNet and chatNet.SetValue then
+                chatNet:SetValue(string.format("Online: %s\nMethods: %d", table.concat(names, ", "), CoreMethodCount()))
+            end
+            local typers = {}
+            for u, t in pairs(getgenv().HolexTypingUsers or {}) do
+                if type(t) == "table" and os.time() - (t.at or 0) <= 6 then
+                    if string.lower(u) ~= string.lower(CoreGetU() or "") then table.insert(typers, u) end
+                end
+            end
+            TypingLabel.Text = (#typers == 0 and "") or (#typers == 1 and (typers[1] .. " is typing...") or (table.concat(typers, ", ") .. " are typing..."))
+        end
+        task.wait(2)
+    end
+end)
 
 -- ==================== HOLEX FRIENDS TAB ====================
 local FriendsTab = MainWindow:CreateTab("Friends")
@@ -7477,36 +7686,30 @@ frSec:CreateButton({
 
 local listSec = FriendsTab:CreateSection("Your Holex Friends")
 local function refreshFriendsTabList()
+    pcall(function() if CorePollAll then CorePollAll() end end)
     for _, child in ipairs(listSec.Content:GetChildren()) do
-        if child:IsA("Frame") or (child:IsA("TextLabel") and child.Name == "FriendEntry") then
-            child:Destroy()
+        if child:IsA("Frame") or child:IsA("TextLabel") or child:IsA("TextButton") then
+            if not child:IsA("UIListLayout") and not child:IsA("UIPadding") then child:Destroy() end
         end
     end
     local friends = UserData.HolexFriends or {}
-    local online = (getgenv().HolexGetOnline and getgenv().HolexGetOnline()) or {}
     local count = 0
     for uname, fdata in pairs(friends) do
         count = count + 1
-        local isOnline = false
-        for _, p in pairs(online) do
-            if p.username and p.username:lower() == uname:lower() then
-                isOnline = true
-                break
-            end
-        end
-        local status = isOnline and "🟢 ONLINE" or "⚫ Offline"
+        local isOnline = select(1, CoreIsOnline(uname))
         listSec:CreateParagraph({
-            Title = uname .. "  " .. status,
-            Content = "Added: " .. os.date("%Y-%m-%d", fdata.addedAt or 0)
+            Title = uname .. " · " .. (isOnline and "ONLINE · Holex V14" or "Offline"),
+            Content = "Added: " .. os.date("%Y-%m-%d", fdata.addedAt or os.time())
         })
     end
     if count == 0 then
         listSec:CreateParagraph({
             Title = "No friends yet",
-            Content = "Add Holex users above. They must be running Holex V14 and logged in."
+            Content = "Add their Holex username. Online = running Holex V14."
         })
     end
 end
+getgenv().HolexRefreshFriendsTab = refreshFriendsTabList
 refreshFriendsTabList()
 
 frSec:CreateButton({
@@ -10684,9 +10887,7 @@ local function ShowMainUI()
     end
 
     local function GetOnlineHolexUsers()
-        pcall(function()
-            if PollAccountRegistry then PollAccountRegistry() end
-        end)
+        pcall(function() if CorePollAll then CorePollAll() end end)
         local online = {}
         pcall(function()
             if isfile and isfile(HOLEX_PRESENCE_FILE) then
@@ -10696,14 +10897,10 @@ local function ShowMainUI()
         pcall(function()
             local now = os.time()
             for _, p in pairs(getgenv().HolexCloudPresence or {}) do
-                if type(p) == "table" and p.username and now - (p.lastSeen or 0) <= 50 then
+                if type(p) == "table" and p.username and now - (p.lastSeen or 0) <= 55 then
                     online["net:" .. string.lower(p.username)] = {
-                        username = p.username,
-                        display = p.display or p.username,
-                        userid = p.userid,
-                        lastSeen = p.lastSeen,
-                        version = p.version or HOLEX_VERSION,
-                        hub = "HolexScriptHubV14",
+                        username = p.username, display = p.display or p.username, userid = p.userid,
+                        lastSeen = p.lastSeen, version = p.version or HOLEX_VERSION, hub = "HolexScriptHubV14",
                     }
                 end
             end
@@ -11866,8 +12063,8 @@ local function CreateAuthScreen()
         end)
         SendDiscordWebhook(username, isGuest)
         pcall(function()
-            if PublishAccountEvent then PublishAccountEvent(isGuest and "guest" or "login", username, isGuest) end
-            if PollAccountRegistry then PollAccountRegistry() end
+            if CorePublishAccount then CorePublishAccount(isGuest and "guest" or "login", username, isGuest) end
+            if CorePollAll then CorePollAll() end
         end)
         HolexLogger:Info("AUTH", "User logged in: " .. username .. (isGuest and " (Guest)" or ""))
 
